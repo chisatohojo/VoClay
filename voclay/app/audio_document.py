@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from voclay.app.models import PitchEdit, PitchFrame
+from voclay.app.models import NoteSegment, PitchEdit, PitchFrame
 
 
 @dataclass
@@ -17,6 +17,7 @@ class AudioDocument:
     mono_samples: np.ndarray
     channels: int
     pitch_frames: list[PitchFrame] = field(default_factory=list)
+    note_segments: list[NoteSegment] = field(default_factory=list)
     edited_samples: np.ndarray | None = None
     edit_history: list[PitchEdit] = field(default_factory=list)
 

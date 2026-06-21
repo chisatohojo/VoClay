@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import log2
+from math import log2, pow
 
 
 @dataclass(frozen=True)
@@ -46,3 +46,46 @@ class TimeRange:
 class PitchEdit:
     selection: TimeRange
     semitones: float
+
+
+@dataclass(frozen=True)
+class NoteSegment:
+    id: int
+    start: float
+    end: float
+    midi_note: float
+    average_f0: float
+    confidence: float | None = None
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+    @property
+    def note_name(self) -> str:
+        names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+        rounded = int(round(self.midi_note))
+        octave = rounded // 12 - 1
+        return f"{names[rounded % 12]}{octave}"
+
+    def shifted(self, semitones: float) -> "NoteSegment":
+        midi_note = self.midi_note + semitones
+        average_f0 = self.average_f0 * pow(2.0, semitones / 12.0)
+        return NoteSegment(
+            id=self.id,
+            start=self.start,
+            end=self.end,
+            midi_note=midi_note,
+            average_f0=average_f0,
+            confidence=self.confidence,
+        )
+
+    def with_range(self, start: float, end: float) -> "NoteSegment":
+        return NoteSegment(
+            id=self.id,
+            start=start,
+            end=end,
+            midi_note=self.midi_note,
+            average_f0=self.average_f0,
+            confidence=self.confidence,
+        )

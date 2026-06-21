@@ -4,16 +4,58 @@ import math
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QBrush, QPen
+from PySide6.QtWidgets import QGraphicsRectItem, QVBoxLayout, QWidget
 
 from voclay.app.audio_document import AudioDocument
-from voclay.app.models import PitchFrame
+from voclay.app.models import NoteSegment, PitchFrame
 from voclay.app.theme import COLORS
+
+
+class NoteBlockItem(QGraphicsRectItem):
+    def __init__(self, note: NoteSegment, index: int, selected: bool, view: "WaveformView") -> None:
+        super().__init__(QRectF(note.start, note.midi_note - 0.38, note.duration, 0.76))
+        self.index = index
+        self.view = view
+        self.selected = selected
+        self.setAcceptHoverEvents(True)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+        self.setZValue(5)
+        self._apply_style(selected, hovered=False)
+
+    def mousePressEvent(self, event) -> None:  # noqa: ANN001, N802
+        self.view.note_selected.emit(self.index)
+        event.accept()
+
+    def hoverEnterEvent(self, event) -> None:  # noqa: ANN001, N802
+        self._apply_style(self.selected, hovered=True)
+        event.accept()
+
+    def hoverLeaveEvent(self, event) -> None:  # noqa: ANN001, N802
+        self._apply_style(self.selected, hovered=False)
+        event.accept()
+
+    def _apply_style(self, selected: bool, hovered: bool) -> None:
+        if selected:
+            brush = QBrush(QColor(255, 184, 107, 120))
+            pen = QPen(QColor(COLORS["warning"]))
+            pen.setWidthF(1.8)
+        elif hovered:
+            brush = QBrush(QColor(184, 156, 255, 105))
+            pen = QPen(QColor(COLORS["accent_alt"]))
+            pen.setWidthF(1.4)
+        else:
+            brush = QBrush(QColor(184, 156, 255, 70))
+            pen = QPen(QColor(COLORS["accent_alt"]))
+            pen.setWidthF(1.0)
+        self.setBrush(brush)
+        self.setPen(pen)
 
 
 class WaveformView(QWidget):
     selection_changed = Signal(float, float)
+    note_selected = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -29,6 +71,9 @@ class WaveformView(QWidget):
         self._selection_start = 0.0
         self._selection_end = 0.0
         self._syncing_selection = False
+        self._note_segments: list[NoteSegment] = []
+        self._note_items: list[NoteBlockItem] = []
+        self._selected_note_index: int | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -59,6 +104,9 @@ class WaveformView(QWidget):
         self.pitch_plot.clear()
         self.waveform_selection = None
         self.pitch_selection = None
+        self._note_segments = []
+        self._note_items = []
+        self._selected_note_index = None
         self._duration = 0.0
         self._selection_start = 0.0
         self._selection_end = 0.0
@@ -98,6 +146,7 @@ class WaveformView(QWidget):
     def set_pitch_frames(self, frames: list[PitchFrame]) -> None:
         self.pitch_plot.clear()
         self.pitch_selection = None
+        self._note_items = []
 
         times: list[float] = []
         midi_values: list[float] = []
@@ -126,6 +175,23 @@ class WaveformView(QWidget):
 
         self._add_pitch_selection_region()
         self._add_pitch_playhead()
+
+    def set_note_segments(
+        self,
+        notes: list[NoteSegment],
+        selected_index: int | None = None,
+    ) -> None:
+        self._note_segments = notes
+        if selected_index is not None and not 0 <= selected_index < len(notes):
+            selected_index = None
+        self._selected_note_index = selected_index
+        self._draw_note_segments()
+
+    def set_selected_note_index(self, index: int | None) -> None:
+        if index is not None and not 0 <= index < len(self._note_segments):
+            index = None
+        self._selected_note_index = index
+        self._draw_note_segments()
 
     def set_playhead_time(self, seconds: float) -> None:
         if self.waveform_playhead is not None:
@@ -166,6 +232,27 @@ class WaveformView(QWidget):
         )
         self.pitch_playhead.setZValue(20)
         self.pitch_plot.addItem(self.pitch_playhead)
+
+    def _draw_note_segments(self) -> None:
+        for item in self._note_items:
+            try:
+                self.pitch_plot.removeItem(item)
+            except Exception:  # noqa: BLE001
+                pass
+        self._note_items = []
+
+        if not self._note_segments:
+            return
+
+        for index, note in enumerate(self._note_segments):
+            item = NoteBlockItem(
+                note=note,
+                index=index,
+                selected=index == self._selected_note_index,
+                view=self,
+            )
+            self.pitch_plot.addItem(item)
+            self._note_items.append(item)
 
     def _add_selection_region(self, plot: pg.PlotWidget) -> pg.LinearRegionItem:
         brush = pg.mkBrush(121, 216, 208, 40)

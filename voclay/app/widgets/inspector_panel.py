@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from voclay.app.audio_document import AudioDocument
-from voclay.app.models import PitchFrame
+from voclay.app.models import NoteSegment, PitchFrame
 from voclay.app.theme import asset_path
 
 
@@ -41,6 +41,8 @@ class InspectorPanel(QFrame):
         self.pitch_frames = QLabel("-")
         self.confidence = QLabel("-")
         self.selection = QLabel("-")
+        self.notes = QLabel("-")
+        self.selected_note = QLabel("-")
         self.edits = QLabel("0")
 
         layout = QVBoxLayout(self)
@@ -61,6 +63,8 @@ class InspectorPanel(QFrame):
         self.pitch_frames.setText("-")
         self.confidence.setText("-")
         self.selection.setText("-")
+        self.notes.setText("-")
+        self.selected_note.setText("-")
         self.edits.setText("0")
 
     def set_document(self, document: AudioDocument) -> None:
@@ -72,6 +76,8 @@ class InspectorPanel(QFrame):
         self.pitch_frames.setText("-")
         self.confidence.setText("-")
         self.selection.setText("-")
+        self.notes.setText(str(len(document.note_segments)) if document.note_segments else "-")
+        self.selected_note.setText("-")
         self.edits.setText(str(len(document.edit_history)))
 
     def set_pitch_frames(self, frames: list[PitchFrame]) -> None:
@@ -102,6 +108,17 @@ class InspectorPanel(QFrame):
     def set_edit_count(self, count: int) -> None:
         self.edits.setText(str(count))
 
+    def set_notes(self, notes: list[NoteSegment], selected_index: int | None = None) -> None:
+        self.notes.setText(str(len(notes)) if notes else "-")
+        if selected_index is None or not 0 <= selected_index < len(notes):
+            self.selected_note.setText("-")
+            return
+
+        note = notes[selected_index]
+        self.selected_note.setText(
+            f"{note.note_name}  {note.start:.2f}-{note.end:.2f} s"
+        )
+
     def _file_form(self) -> QFormLayout:
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignLeft)
@@ -118,6 +135,8 @@ class InspectorPanel(QFrame):
         form.addRow("Frames", self.pitch_frames)
         form.addRow("Confidence", self.confidence)
         form.addRow("Selection", self.selection)
+        form.addRow("Notes", self.notes)
+        form.addRow("Selected note", self.selected_note)
         form.addRow("Edits", self.edits)
         return form
 
