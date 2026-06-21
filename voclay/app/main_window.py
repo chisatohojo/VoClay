@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QIcon, QPixmap
@@ -23,31 +25,117 @@ from PySide6.QtWidgets import (
 from voclay.app.audio_editor import AudioEditor
 from voclay.app.audio_document import AudioDocument
 from voclay.app.audio_player import AudioPlayer
-from voclay.app.models import NoteSegment, PitchEdit, PitchFrame, TimeRange
+from voclay.app.chord_analyzer import ChordAnalyzer
+from voclay.app.models import ChordChange, ChordFrame, NoteSegment, PitchEdit, PitchFrame, TimeRange, VocalNote
 from voclay.app.note_segmenter import NoteSegmenter
 from voclay.app.pitch_analyzer import PitchAnalyzer
 from voclay.app.scale_tools import KEYS, SCALES, nearest_scale_delta
 from voclay.app.theme import asset_path
+from voclay.app.vocal_separator import VocalSeparator
 from voclay.app.widgets.inspector_panel import InspectorPanel
 from voclay.app.widgets.waveform_view import WaveformView
 
 
+@dataclass
+class AnalysisResult:
+    frames: list[PitchFrame]
+    notes: list[VocalNote]
+    chord_frames: list[ChordFrame]
+    chord_changes: list[ChordChange]
+    input_mode: str
+    analysis_audio_path: Path | None
+    vocal_stem_path: Path | None
+    accompaniment_stem_path: Path | None
+    vocal_separation_message: str
+    chord_analysis_message: str
+    status_message: str
+
+
 class PitchAnalysisWorker(QObject):
-    finished = Signal(list)
+    finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, document: AudioDocument) -> None:
+    def __init__(self, document: AudioDocument, input_mode: str) -> None:
         super().__init__()
         self.document = document
+        self.input_mode = input_mode
 
     @Slot()
     def run(self) -> None:
         try:
-            frames = PitchAnalyzer().analyze(self.document)
+            result = self._run_analysis()
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
             return
-        self.finished.emit(frames)
+        self.finished.emit(result)
+
+    def _run_analysis(self) -> AnalysisResult:
+        self.document.set_input_mode(self.input_mode)
+        self.document.chord_frames = []
+        self.document.chord_changes = []
+        self.document.vocal_separation_message = "Skipped"
+        self.document.chord_analysis_message = "Skipped"
+
+        vocal_stem_path: Path | None = None
+        accompaniment_stem_path: Path | None = None
+        vocal_message = "Skipped in Vocal Only Mode"
+        chord_message = "Chord analysis skipped in Vocal Only Mode"
+
+        if self.input_mode == "Mixed Audio":
+            output_dir = Path(tempfile.mkdtemp(prefix="voclay_stems_"))
+            separation = VocalSeparator().separate(str(self.document.source_file_path or self.document.file_path), str(output_dir))
+            vocal_message = separation.message
+            if separation.success and separation.vocal_path:
+                vocal_stem_path = Path(separation.vocal_path)
+                accompaniment_stem_path = Path(separation.accompaniment_path) if separation.accompaniment_path else None
+                self.document.set_vocal_stems(vocal_stem_path, accompaniment_stem_path)
+                self.document.set_analysis_audio(vocal_stem_path)
+            else:
+                self.document.set_vocal_stems(None, None)
+                self.document.use_source_for_analysis()
+                vocal_message = f"{vocal_message} Using source audio for analysis."
+
+            chord_source = accompaniment_stem_path or self.document.source_file_path or self.document.file_path
+            chord_result = ChordAnalyzer().analyze(chord_source)
+            chord_frames = chord_result.frames
+            chord_changes = chord_result.changes
+            chord_message = chord_result.message
+        else:
+            self.document.set_vocal_stems(None, None)
+            self.document.use_source_for_analysis()
+            chord_frames = []
+            chord_changes = []
+
+        frames = PitchAnalyzer().analyze(self.document)
+        voiced_count = sum(1 for frame in frames if frame.voiced and frame.f0 is not None)
+        if voiced_count < 3:
+            notes: list[VocalNote] = []
+            status = "F0 detection failed or too few voiced frames"
+        else:
+            notes = NoteSegmenter().segment(
+                frames,
+                self.document.analysis_duration,
+                chord_changes,
+            )
+            status = (
+                f"{self.input_mode}: {len(frames):,} F0 frames, "
+                f"{voiced_count:,} voiced, {len(chord_changes):,} chord changes, "
+                f"{len(notes):,} notes"
+            )
+
+        return AnalysisResult(
+            frames=frames,
+            notes=notes,
+            chord_frames=chord_frames,
+            chord_changes=chord_changes,
+            input_mode=self.input_mode,
+            analysis_audio_path=self.document.analysis_audio_path,
+            vocal_stem_path=vocal_stem_path,
+            accompaniment_stem_path=accompaniment_stem_path,
+            vocal_separation_message=vocal_message,
+            chord_analysis_message=chord_message,
+            status_message=status,
+        )
 
 
 class PitchShiftWorker(QObject):
@@ -122,6 +210,9 @@ class MainWindow(QMainWindow):
         self.pitch_down_button = self._make_button("-1 semitone", QStyle.SP_ArrowDown)
         self.pitch_up_button = self._make_button("+1 semitone", QStyle.SP_ArrowUp)
         self.export_button = self._make_button("Export WAV", QStyle.SP_DialogSaveButton)
+        self.input_mode_combo = QComboBox()
+        self.input_mode_combo.addItems(["Vocal Only", "Mixed Audio"])
+        self.input_mode_combo.setCurrentText("Vocal Only")
         self.detect_notes_button = self._make_button("Detect Notes", QStyle.SP_FileDialogListView)
         self.previous_note_button = self._make_button("Prev Note", QStyle.SP_MediaSeekBackward)
         self.next_note_button = self._make_button("Next Note", QStyle.SP_MediaSeekForward)
@@ -229,6 +320,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.pitch_down_button)
         layout.addWidget(self.pitch_up_button)
         layout.addWidget(self.export_button)
+        layout.addSpacing(8)
+        mode_label = QLabel("Input Mode")
+        mode_label.setObjectName("MutedLabel")
+        layout.addWidget(mode_label)
+        layout.addWidget(self.input_mode_combo)
         layout.addSpacing(12)
         layout.addWidget(self.file_label, stretch=1)
         return bar
@@ -315,6 +411,8 @@ class MainWindow(QMainWindow):
             return
 
         self.document = document
+        self.document.set_input_mode(self.input_mode_combo.currentText())
+        self.document.use_source_for_analysis()
         self.selected_note_index = None
         self.waveform_view.set_audio(document)
         self.waveform_view.set_note_segments([])
@@ -339,9 +437,10 @@ class MainWindow(QMainWindow):
         self._set_state("Analyzing", self.document.file_name)
         self.analyze_button.setEnabled(False)
         self.open_button.setEnabled(False)
+        self.input_mode_combo.setEnabled(False)
 
         thread = QThread(self)
-        worker = PitchAnalysisWorker(self.document)
+        worker = PitchAnalysisWorker(self.document, self.input_mode_combo.currentText())
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
@@ -358,19 +457,34 @@ class MainWindow(QMainWindow):
         self.analysis_worker = worker
         thread.start()
 
-    @Slot(list)
-    def _analysis_finished(self, frames: list[PitchFrame]) -> None:
+    @Slot(object)
+    def _analysis_finished(self, result: AnalysisResult) -> None:
         if self.document is None:
             return
 
-        self.document.pitch_frames = frames
-        self.document.note_segments = []
+        self.document.set_input_mode(result.input_mode)
+        self.document.analysis_audio_path = result.analysis_audio_path
+        self.document.set_vocal_stems(result.vocal_stem_path, result.accompaniment_stem_path)
+        self.document.vocal_separation_message = result.vocal_separation_message
+        self.document.chord_analysis_message = result.chord_analysis_message
+        self.document.pitch_frames = result.frames
+        self.document.chord_frames = result.chord_frames
+        self.document.chord_changes = result.chord_changes
+        self.document.note_segments = result.notes
         self.selected_note_index = None
-        self.waveform_view.set_pitch_frames(frames)
-        note_count = self._refresh_notes_from_pitch()
-        self.inspector_panel.set_pitch_frames(frames)
-        voiced_count = sum(1 for frame in frames if frame.voiced)
-        self._set_state("Ready", f"{voiced_count:,} voiced frames, {note_count:,} notes")
+        self.waveform_view.set_pitch_frames(result.frames)
+        self.inspector_panel.set_document(self.document)
+        self.inspector_panel.set_pitch_frames(result.frames)
+        self.inspector_panel.set_analysis_status(self.document)
+
+        if result.notes:
+            self._select_note_index(0)
+        else:
+            self.waveform_view.set_note_segments([])
+            self.inspector_panel.set_notes([])
+            self._update_note_buttons()
+
+        self._set_state("Ready", result.status_message)
 
     @Slot(str)
     def _analysis_failed(self, message: str) -> None:
@@ -382,6 +496,7 @@ class MainWindow(QMainWindow):
         self.analysis_thread = None
         self.analysis_worker = None
         self.open_button.setEnabled(True)
+        self.input_mode_combo.setEnabled(True)
         self.analyze_button.setEnabled(self.document is not None)
         self._update_edit_buttons()
         self._update_note_buttons()
@@ -870,6 +985,7 @@ class MainWindow(QMainWindow):
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         self.open_button.setEnabled(enabled)
+        self.input_mode_combo.setEnabled(enabled)
         self.analyze_button.setEnabled(enabled and self.document is not None)
         self.play_button.setEnabled(enabled and self.document is not None)
         self.export_button.setEnabled(enabled and self.document is not None)
@@ -892,7 +1008,11 @@ class MainWindow(QMainWindow):
         if self.document is None:
             return 0
 
-        notes = NoteSegmenter().segment(self.document.pitch_frames, self.document.duration)
+        notes = NoteSegmenter().segment(
+            self.document.pitch_frames,
+            self.document.analysis_duration,
+            self.document.chord_changes,
+        )
         self.document.note_segments = notes
         if not notes:
             self.selected_note_index = None

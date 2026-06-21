@@ -34,6 +34,10 @@ class InspectorPanel(QFrame):
         self.sample_rate = QLabel("-")
         self.channels = QLabel("-")
         self.duration = QLabel("-")
+        self.input_mode = QLabel("-")
+        self.analysis_audio = QLabel("-")
+        self.vocal_separation = QLabel("-")
+        self.chord_changes = QLabel("-")
         self.pitch_range = QLabel("-")
         self.pitch_frames = QLabel("-")
         self.notes = QLabel("-")
@@ -45,6 +49,7 @@ class InspectorPanel(QFrame):
         self.note_midi = QLabel("-")
         self.note_name = QLabel("-")
         self.note_cents = QLabel("-")
+        self.note_split_reason = QLabel("-")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -60,6 +65,10 @@ class InspectorPanel(QFrame):
         self.sample_rate.setText("-")
         self.channels.setText("-")
         self.duration.setText("-")
+        self.input_mode.setText("-")
+        self.analysis_audio.setText("-")
+        self.vocal_separation.setText("-")
+        self.chord_changes.setText("-")
         self.pitch_range.setText("-")
         self.pitch_frames.setText("-")
         self.notes.setText("-")
@@ -72,6 +81,10 @@ class InspectorPanel(QFrame):
         self.sample_rate.setText(f"{document.sample_rate:,} Hz")
         self.channels.setText(str(document.channels))
         self.duration.setText(f"{document.duration:.2f} s")
+        self.input_mode.setText(document.input_mode)
+        self.analysis_audio.setText(document.analysis_audio_path.name if document.analysis_audio_path else "-")
+        self.vocal_separation.setText(document.vocal_separation_message)
+        self.chord_changes.setText(str(len(document.chord_changes)))
         self.pitch_range.setText("-")
         self.pitch_frames.setText("-")
         self.notes.setText(str(len(document.vocal_notes)) if document.vocal_notes else "-")
@@ -89,6 +102,12 @@ class InspectorPanel(QFrame):
 
         f0_values = [float(frame.f0) for frame in voiced if frame.f0 is not None]
         self.pitch_range.setText(f"{min(f0_values):.1f} - {max(f0_values):.1f} Hz")
+
+    def set_analysis_status(self, document: AudioDocument) -> None:
+        self.input_mode.setText(document.input_mode)
+        self.analysis_audio.setText(document.analysis_audio_path.name if document.analysis_audio_path else "-")
+        self.vocal_separation.setText(document.vocal_separation_message)
+        self.chord_changes.setText(str(len(document.chord_changes)))
 
     def set_selection_range(self, start: float, end: float) -> None:
         pass
@@ -111,6 +130,7 @@ class InspectorPanel(QFrame):
         self.note_midi.setText(str(int(round(note.midi_note))))
         self.note_name.setText(note.note_name)
         self.note_cents.setText(f"{note.cents_offset:+.1f} cents")
+        self.note_split_reason.setText(note.split_reason)
 
     def _file_form(self) -> QFormLayout:
         form = QFormLayout()
@@ -124,6 +144,10 @@ class InspectorPanel(QFrame):
     def _analysis_form(self) -> QFormLayout:
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignLeft)
+        form.addRow("Input mode", self.input_mode)
+        form.addRow("Analysis audio", self.analysis_audio)
+        form.addRow("Vocal separation", self.vocal_separation)
+        form.addRow("Chord changes", self.chord_changes)
         form.addRow("Pitch range", self.pitch_range)
         form.addRow("Frames", self.pitch_frames)
         form.addRow("Notes", self.notes)
@@ -140,6 +164,7 @@ class InspectorPanel(QFrame):
         form.addRow("MIDI note", self.note_midi)
         form.addRow("Note name", self.note_name)
         form.addRow("Cents offset", self.note_cents)
+        form.addRow("Split reason", self.note_split_reason)
         return form
 
     def _clear_selected_note_detail(self) -> None:
@@ -149,6 +174,7 @@ class InspectorPanel(QFrame):
         self.note_midi.setText("-")
         self.note_name.setText("-")
         self.note_cents.setText("-")
+        self.note_split_reason.setText("-")
 
     def _section(self, title: str, content: QWidget | QFormLayout) -> QWidget:
         wrapper = QWidget()

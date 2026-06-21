@@ -70,6 +70,7 @@ class PitchPoint:
     f0: float | None
     midi: float | None
     voiced: bool
+    confidence: float | None = None
 
     def shifted(self, semitones: float, factor: float | None = None) -> "PitchPoint":
         if factor is None:
@@ -79,10 +80,32 @@ class PitchPoint:
             f0=self.f0 * factor if self.f0 is not None else None,
             midi=self.midi + semitones if self.midi is not None else None,
             voiced=self.voiced,
+            confidence=self.confidence,
         )
 
     def with_time(self, time: float) -> "PitchPoint":
-        return PitchPoint(time=time, f0=self.f0, midi=self.midi, voiced=self.voiced)
+        return PitchPoint(
+            time=time,
+            f0=self.f0,
+            midi=self.midi,
+            voiced=self.voiced,
+            confidence=self.confidence,
+        )
+
+
+@dataclass(frozen=True)
+class ChordFrame:
+    time: float
+    chord_label: str
+    confidence: float | None = None
+
+
+@dataclass(frozen=True)
+class ChordChange:
+    time: float
+    prev_chord: str
+    next_chord: str
+    confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +117,7 @@ class VocalNote:
     cents_offset: float = 0.0
     original_midi_median: float = 0.0
     pitch_points: tuple[PitchPoint, ...] = field(default_factory=tuple)
+    split_reason: str = "pitch_change"
     selected: bool = False
     confidence: float | None = None
     voiced: bool = True
@@ -129,6 +153,7 @@ class VocalNote:
             cents_offset=self.cents_offset,
             original_midi_median=self.original_midi_median + semitones,
             pitch_points=tuple(point.shifted(semitones) for point in self.pitch_points),
+            split_reason=self.split_reason,
             selected=self.selected,
             confidence=self.confidence,
             voiced=self.voiced,
@@ -144,6 +169,7 @@ class VocalNote:
             cents_offset=self.cents_offset,
             original_midi_median=self.original_midi_median,
             pitch_points=self.pitch_points,
+            split_reason=self.split_reason,
             selected=self.selected,
             confidence=self.confidence,
             voiced=self.voiced,
@@ -163,6 +189,7 @@ class VocalNote:
             cents_offset=(self.original_midi_median + delta - midi_note) * 100.0,
             original_midi_median=self.original_midi_median + delta,
             pitch_points=tuple(point.shifted(delta, factor) for point in self.pitch_points),
+            split_reason=self.split_reason,
             selected=self.selected,
             confidence=self.confidence,
             voiced=self.voiced,
@@ -194,6 +221,7 @@ class VocalNote:
             cents_offset=self.cents_offset,
             original_midi_median=self.original_midi_median,
             pitch_points=pitch_points,
+            split_reason=self.split_reason,
             selected=self.selected,
             confidence=self.confidence,
             voiced=self.voiced,
@@ -210,6 +238,7 @@ class VocalNote:
             cents_offset=self.cents_offset,
             original_midi_median=self.original_midi_median,
             pitch_points=self.pitch_points,
+            split_reason=self.split_reason,
             selected=selected,
             confidence=self.confidence,
             voiced=self.voiced,

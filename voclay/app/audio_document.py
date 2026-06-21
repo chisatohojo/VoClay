@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from voclay.app.models import AudioEffectEdit, PitchEdit, PitchFrame, VocalNote
+from voclay.app.models import AudioEffectEdit, ChordChange, ChordFrame, PitchEdit, PitchFrame, VocalNote
 
 
 AudioEdit = PitchEdit | AudioEffectEdit
@@ -19,7 +19,19 @@ class AudioDocument:
     samples: np.ndarray
     mono_samples: np.ndarray
     channels: int
+    source_file_path: Path | None = None
+    analysis_audio_path: Path | None = None
+    input_mode: str = "Vocal Only"
+    vocal_stem_path: Path | None = None
+    accompaniment_stem_path: Path | None = None
+    analysis_samples: np.ndarray | None = None
+    analysis_mono_samples_data: np.ndarray | None = None
+    analysis_sample_rate: int | None = None
     pitch_frames: list[PitchFrame] = field(default_factory=list)
+    chord_frames: list[ChordFrame] = field(default_factory=list)
+    chord_changes: list[ChordChange] = field(default_factory=list)
+    vocal_separation_message: str = "Not run"
+    chord_analysis_message: str = "Not run"
     vocal_notes: list[VocalNote] = field(default_factory=list)
     edited_samples: np.ndarray | None = None
     edit_history: list[AudioEdit] = field(default_factory=list)
@@ -43,6 +55,11 @@ class AudioDocument:
             samples=samples.astype(np.float32, copy=False),
             mono_samples=mono_samples,
             channels=channels,
+            source_file_path=path,
+            analysis_audio_path=path,
+            analysis_samples=samples.astype(np.float32, copy=False),
+            analysis_mono_samples_data=mono_samples,
+            analysis_sample_rate=int(sample_rate),
         )
 
     @property
@@ -54,10 +71,21 @@ class AudioDocument:
         return int(self.mono_samples.shape[0])
 
     @property
+    def analysis_frame_count(self) -> int:
+        return int(self.analysis_mono_samples.shape[0])
+
+    @property
     def duration(self) -> float:
         if self.sample_rate <= 0:
             return 0.0
         return self.frame_count / float(self.sample_rate)
+
+    @property
+    def analysis_duration(self) -> float:
+        sample_rate = self.analysis_sample_rate or self.sample_rate
+        if sample_rate <= 0:
+            return 0.0
+        return self.analysis_frame_count / float(sample_rate)
 
     @property
     def current_samples(self) -> np.ndarray:
@@ -71,6 +99,12 @@ class AudioDocument:
         if samples.ndim == 1:
             return samples.astype(np.float32, copy=False)
         return samples.mean(axis=1).astype(np.float32, copy=False)
+
+    @property
+    def analysis_mono_samples(self) -> np.ndarray:
+        if self.analysis_mono_samples_data is not None:
+            return self.analysis_mono_samples_data.astype(np.float32, copy=False)
+        return self.current_mono_samples
 
     @property
     def has_edits(self) -> bool:
@@ -87,6 +121,34 @@ class AudioDocument:
     @note_segments.setter
     def note_segments(self, notes: list[VocalNote]) -> None:
         self.vocal_notes = notes
+
+    def set_input_mode(self, input_mode: str) -> None:
+        self.input_mode = input_mode
+
+    def set_analysis_audio(self, file_path: str | Path) -> None:
+        path = Path(file_path)
+        samples, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+        if samples.size == 0 or samples.shape[0] == 0:
+            raise ValueError("The analysis audio contains no samples.")
+
+        self.analysis_audio_path = path
+        self.analysis_samples = samples.astype(np.float32, copy=False)
+        self.analysis_mono_samples_data = self.analysis_samples.mean(axis=1).astype(np.float32, copy=False)
+        self.analysis_sample_rate = int(sample_rate)
+
+    def use_source_for_analysis(self) -> None:
+        self.analysis_audio_path = self.source_file_path or self.file_path
+        self.analysis_samples = self.samples
+        self.analysis_mono_samples_data = self.mono_samples
+        self.analysis_sample_rate = self.sample_rate
+
+    def set_vocal_stems(
+        self,
+        vocal_path: str | Path | None,
+        accompaniment_path: str | Path | None = None,
+    ) -> None:
+        self.vocal_stem_path = Path(vocal_path) if vocal_path else None
+        self.accompaniment_stem_path = Path(accompaniment_path) if accompaniment_path else None
 
     def apply_pitch_edit(
         self,

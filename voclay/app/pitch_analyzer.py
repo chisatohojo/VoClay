@@ -15,10 +15,11 @@ class PitchAnalyzer:
     def analyze(self, document: AudioDocument) -> list[PitchFrame]:
         import librosa
 
-        if document.frame_count == 0:
+        if document.analysis_frame_count == 0:
             return []
 
-        y = np.asarray(document.mono_samples, dtype=np.float32)
+        sample_rate = document.analysis_sample_rate or document.sample_rate
+        y = np.asarray(document.analysis_mono_samples, dtype=np.float32)
         fmin = librosa.note_to_hz("C2")
         fmax = librosa.note_to_hz("C7")
 
@@ -26,10 +27,10 @@ class PitchAnalyzer:
             y,
             fmin=fmin,
             fmax=fmax,
-            sr=document.sample_rate,
+            sr=sample_rate,
             hop_length=self.hop_length,
         )
-        times = librosa.times_like(f0, sr=document.sample_rate, hop_length=self.hop_length)
+        times = librosa.times_like(f0, sr=sample_rate, hop_length=self.hop_length)
 
         frames: list[PitchFrame] = []
         for time_value, f0_value, voiced, confidence in zip(times, f0, voiced_flag, voiced_prob):
