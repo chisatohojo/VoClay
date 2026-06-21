@@ -40,6 +40,8 @@ class InspectorPanel(QFrame):
         self.pitch_range = QLabel("-")
         self.pitch_frames = QLabel("-")
         self.confidence = QLabel("-")
+        self.selection = QLabel("-")
+        self.edits = QLabel("0")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -58,6 +60,8 @@ class InspectorPanel(QFrame):
         self.pitch_range.setText("-")
         self.pitch_frames.setText("-")
         self.confidence.setText("-")
+        self.selection.setText("-")
+        self.edits.setText("0")
 
     def set_document(self, document: AudioDocument) -> None:
         self.file_name.setText(document.file_name)
@@ -67,6 +71,8 @@ class InspectorPanel(QFrame):
         self.pitch_range.setText("-")
         self.pitch_frames.setText("-")
         self.confidence.setText("-")
+        self.selection.setText("-")
+        self.edits.setText(str(len(document.edit_history)))
 
     def set_pitch_frames(self, frames: list[PitchFrame]) -> None:
         voiced = [frame for frame in frames if frame.voiced and frame.f0 is not None]
@@ -90,6 +96,12 @@ class InspectorPanel(QFrame):
         else:
             self.confidence.setText("-")
 
+    def set_selection_range(self, start: float, end: float) -> None:
+        self.selection.setText(f"{start:.2f} - {end:.2f} s ({max(0.0, end - start):.2f} s)")
+
+    def set_edit_count(self, count: int) -> None:
+        self.edits.setText(str(count))
+
     def _file_form(self) -> QFormLayout:
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignLeft)
@@ -105,6 +117,8 @@ class InspectorPanel(QFrame):
         form.addRow("Pitch range", self.pitch_range)
         form.addRow("Frames", self.pitch_frames)
         form.addRow("Confidence", self.confidence)
+        form.addRow("Selection", self.selection)
+        form.addRow("Edits", self.edits)
         return form
 
     def _future_controls(self) -> QWidget:

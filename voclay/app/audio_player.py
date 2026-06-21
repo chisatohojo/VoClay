@@ -17,7 +17,7 @@ class AudioPlayer:
     def play(self, document: AudioDocument) -> None:
         self.stop()
 
-        data = document.samples
+        data = document.current_samples
         if data.ndim == 2 and data.shape[1] == 1:
             data = data[:, 0]
         data = np.asarray(data, dtype=np.float32)

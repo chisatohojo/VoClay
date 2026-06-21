@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 import pyqtgraph as pg
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from voclay.app.audio_document import AudioDocument
@@ -12,6 +13,8 @@ from voclay.app.theme import COLORS
 
 
 class WaveformView(QWidget):
+    selection_changed = Signal(float, float)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         pg.setConfigOptions(antialias=True)
@@ -20,6 +23,12 @@ class WaveformView(QWidget):
         self.pitch_plot = pg.PlotWidget()
         self.waveform_playhead: pg.InfiniteLine | None = None
         self.pitch_playhead: pg.InfiniteLine | None = None
+        self.waveform_selection: pg.LinearRegionItem | None = None
+        self.pitch_selection: pg.LinearRegionItem | None = None
+        self._duration = 0.0
+        self._selection_start = 0.0
+        self._selection_end = 0.0
+        self._syncing_selection = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -48,6 +57,11 @@ class WaveformView(QWidget):
     def clear(self) -> None:
         self.waveform_plot.clear()
         self.pitch_plot.clear()
+        self.waveform_selection = None
+        self.pitch_selection = None
+        self._duration = 0.0
+        self._selection_start = 0.0
+        self._selection_end = 0.0
         self._add_playheads()
         self.waveform_plot.setYRange(-1.05, 1.05)
         self.pitch_plot.setYRange(36, 96)
@@ -59,13 +73,14 @@ class WaveformView(QWidget):
         if sample_count == 0:
             return
 
+        self._duration = document.duration
         max_points = 48000
         if sample_count > max_points:
             indices = np.linspace(0, sample_count - 1, max_points).astype(np.int64)
-            y_values = document.mono_samples[indices]
+            y_values = document.current_mono_samples[indices]
             x_values = indices / float(document.sample_rate)
         else:
-            y_values = document.mono_samples
+            y_values = document.current_mono_samples
             x_values = np.arange(sample_count, dtype=np.float32) / float(document.sample_rate)
 
         self.waveform_plot.plot(
@@ -76,9 +91,13 @@ class WaveformView(QWidget):
         )
         self.waveform_plot.setXRange(0.0, max(0.1, document.duration), padding=0.01)
         self.waveform_plot.setYRange(-1.05, 1.05)
+        if document.duration > 0:
+            default_end = min(document.duration, max(0.25, document.duration * 0.25))
+            self.set_selection_range(0.0, default_end, emit=False)
 
     def set_pitch_frames(self, frames: list[PitchFrame]) -> None:
         self.pitch_plot.clear()
+        self.pitch_selection = None
 
         times: list[float] = []
         midi_values: list[float] = []
@@ -105,6 +124,7 @@ class WaveformView(QWidget):
                 connect="finite",
             )
 
+        self._add_pitch_selection_region()
         self._add_pitch_playhead()
 
     def set_playhead_time(self, seconds: float) -> None:
@@ -113,6 +133,19 @@ class WaveformView(QWidget):
         if self.pitch_playhead is not None:
             self.pitch_playhead.setValue(seconds)
 
+    def selection_range(self) -> tuple[float, float] | None:
+        if self._selection_end <= self._selection_start:
+            return None
+        return self._selection_start, self._selection_end
+
+    def set_selection_range(self, start: float, end: float, emit: bool = True) -> None:
+        start, end = self._clamp_selection(start, end)
+        self._selection_start = start
+        self._selection_end = end
+        self._sync_selection_items()
+        if emit:
+            self.selection_changed.emit(start, end)
+
     def _add_playheads(self) -> None:
         self.waveform_playhead = pg.InfiniteLine(
             pos=0.0,
@@ -120,6 +153,7 @@ class WaveformView(QWidget):
             movable=False,
             pen=pg.mkPen(COLORS["warning"], width=2),
         )
+        self.waveform_playhead.setZValue(20)
         self.waveform_plot.addItem(self.waveform_playhead)
         self._add_pitch_playhead()
 
@@ -130,7 +164,71 @@ class WaveformView(QWidget):
             movable=False,
             pen=pg.mkPen(COLORS["warning"], width=2),
         )
+        self.pitch_playhead.setZValue(20)
         self.pitch_plot.addItem(self.pitch_playhead)
+
+    def _add_selection_region(self, plot: pg.PlotWidget) -> pg.LinearRegionItem:
+        brush = pg.mkBrush(121, 216, 208, 40)
+        hover_brush = pg.mkBrush(184, 156, 255, 55)
+        pen = pg.mkPen(COLORS["accent"], width=1.2)
+        hover_pen = pg.mkPen(COLORS["accent_alt"], width=1.4)
+        region = pg.LinearRegionItem(
+            values=(self._selection_start, self._selection_end),
+            orientation="vertical",
+            brush=brush,
+            pen=pen,
+            hoverBrush=hover_brush,
+            hoverPen=hover_pen,
+            movable=True,
+            bounds=(0.0, max(0.0, self._duration)),
+        )
+        region.setZValue(8)
+        plot.addItem(region)
+        return region
+
+    def _add_waveform_selection_region(self) -> None:
+        if self.waveform_selection is not None or self._duration <= 0:
+            return
+        self.waveform_selection = self._add_selection_region(self.waveform_plot)
+        self.waveform_selection.sigRegionChanged.connect(self._waveform_region_changed)
+
+    def _add_pitch_selection_region(self) -> None:
+        if self.pitch_selection is not None or self._duration <= 0:
+            return
+        self.pitch_selection = self._add_selection_region(self.pitch_plot)
+        self.pitch_selection.sigRegionChanged.connect(self._pitch_region_changed)
+
+    def _sync_selection_items(self) -> None:
+        self._syncing_selection = True
+        try:
+            self._add_waveform_selection_region()
+            self._add_pitch_selection_region()
+            for item in (self.waveform_selection, self.pitch_selection):
+                if item is not None:
+                    item.blockSignals(True)
+                    item.setRegion((self._selection_start, self._selection_end))
+                    item.blockSignals(False)
+        finally:
+            self._syncing_selection = False
+
+    def _waveform_region_changed(self) -> None:
+        self._region_changed(self.waveform_selection)
+
+    def _pitch_region_changed(self) -> None:
+        self._region_changed(self.pitch_selection)
+
+    def _region_changed(self, item: pg.LinearRegionItem | None) -> None:
+        if self._syncing_selection or item is None:
+            return
+        start, end = item.getRegion()
+        self.set_selection_range(float(start), float(end), emit=True)
+
+    def _clamp_selection(self, start: float, end: float) -> tuple[float, float]:
+        start = max(0.0, min(float(start), self._duration))
+        end = max(0.0, min(float(end), self._duration))
+        if end < start:
+            start, end = end, start
+        return start, end
 
     def _add_pitch_grid(self, low: int, high: int) -> None:
         for note in range(low, high + 1):
