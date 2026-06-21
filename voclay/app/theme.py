@@ -91,6 +91,25 @@ def apply_theme(app: QApplication) -> None:
             border-color: {COLORS["panel"]};
         }}
 
+        QComboBox {{
+            background-color: {COLORS["panel_light"]};
+            color: {COLORS["text"]};
+            border: 1px solid {COLORS["border"]};
+            border-radius: 7px;
+            padding: 6px 28px 6px 10px;
+            min-width: 92px;
+        }}
+
+        QComboBox:hover {{
+            border-color: {COLORS["accent"]};
+        }}
+
+        QComboBox:disabled {{
+            color: {COLORS["text_muted"]};
+            background-color: {COLORS["background_alt"]};
+            border-color: {COLORS["panel"]};
+        }}
+
         QStatusBar {{
             background-color: {COLORS["background_alt"]};
             color: {COLORS["text_muted"]};

@@ -6,7 +6,10 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from voclay.app.models import NoteSegment, PitchEdit, PitchFrame
+from voclay.app.models import AudioEffectEdit, PitchEdit, PitchFrame, VocalNote
+
+
+AudioEdit = PitchEdit | AudioEffectEdit
 
 
 @dataclass
@@ -17,9 +20,9 @@ class AudioDocument:
     mono_samples: np.ndarray
     channels: int
     pitch_frames: list[PitchFrame] = field(default_factory=list)
-    note_segments: list[NoteSegment] = field(default_factory=list)
+    vocal_notes: list[VocalNote] = field(default_factory=list)
     edited_samples: np.ndarray | None = None
-    edit_history: list[PitchEdit] = field(default_factory=list)
+    edit_history: list[AudioEdit] = field(default_factory=list)
 
     @classmethod
     def load(cls, file_path: str | Path) -> "AudioDocument":
@@ -73,16 +76,36 @@ class AudioDocument:
     def has_edits(self) -> bool:
         return bool(self.edit_history)
 
+    @property
+    def edit_count(self) -> int:
+        return len(self.edit_history)
+
+    @property
+    def note_segments(self) -> list[VocalNote]:
+        return self.vocal_notes
+
+    @note_segments.setter
+    def note_segments(self, notes: list[VocalNote]) -> None:
+        self.vocal_notes = notes
+
     def apply_pitch_edit(
         self,
         edited_samples: np.ndarray,
         pitch_frames: list[PitchFrame],
         edit: PitchEdit,
     ) -> None:
+        self.apply_audio_edits(edited_samples, pitch_frames, [edit])
+
+    def apply_audio_edits(
+        self,
+        edited_samples: np.ndarray,
+        pitch_frames: list[PitchFrame],
+        edits: list[AudioEdit],
+    ) -> None:
         self.edited_samples = edited_samples.astype(np.float32, copy=False)
         self.mono_samples = self.current_mono_samples
         self.pitch_frames = pitch_frames
-        self.edit_history.append(edit)
+        self.edit_history.extend(edits)
 
     def export_wav(self, file_path: str | Path) -> None:
         sf.write(str(file_path), self.current_samples, self.sample_rate)

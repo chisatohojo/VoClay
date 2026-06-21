@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QComboBox,
     QSizePolicy,
     QSplitter,
     QStyle,
@@ -25,6 +26,7 @@ from voclay.app.audio_player import AudioPlayer
 from voclay.app.models import NoteSegment, PitchEdit, PitchFrame, TimeRange
 from voclay.app.note_segmenter import NoteSegmenter
 from voclay.app.pitch_analyzer import PitchAnalyzer
+from voclay.app.scale_tools import KEYS, SCALES, nearest_scale_delta
 from voclay.app.theme import asset_path
 from voclay.app.widgets.inspector_panel import InspectorPanel
 from voclay.app.widgets.waveform_view import WaveformView
@@ -72,6 +74,24 @@ class PitchShiftWorker(QObject):
         self.finished.emit(edited_samples, frames, edit)
 
 
+class AudioOperationWorker(QObject):
+    finished = Signal(object, object, object, object)
+    failed = Signal(str)
+
+    def __init__(self, operation) -> None:  # noqa: ANN001
+        super().__init__()
+        self.operation = operation
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            edited_samples, frames, edits, select_time = self.operation()
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(edited_samples, frames, edits, select_time)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -91,7 +111,7 @@ class MainWindow(QMainWindow):
         self.analysis_thread: QThread | None = None
         self.analysis_worker: PitchAnalysisWorker | None = None
         self.edit_thread: QThread | None = None
-        self.edit_worker: PitchShiftWorker | None = None
+        self.edit_worker: QObject | None = None
         self.selected_note_index: int | None = None
 
         self.waveform_view = WaveformView()
@@ -111,6 +131,20 @@ class MainWindow(QMainWindow):
         self.note_start_later_button = self._make_button("Start +", QStyle.SP_ArrowRight)
         self.note_shorter_button = self._make_button("Shorter", QStyle.SP_TitleBarShadeButton)
         self.note_longer_button = self._make_button("Longer", QStyle.SP_TitleBarUnshadeButton)
+        self.scale_key_combo = QComboBox()
+        self.scale_key_combo.addItems(KEYS.keys())
+        self.scale_key_combo.setCurrentText("C")
+        self.scale_mode_combo = QComboBox()
+        self.scale_mode_combo.addItems(SCALES.keys())
+        self.scale_mode_combo.setCurrentText("Major")
+        self.snap_note_button = self._make_button("Snap Note", QStyle.SP_DialogApplyButton)
+        self.snap_all_button = self._make_button("Snap All", QStyle.SP_DialogApplyButton)
+        self.vibrato_down_button = self._make_button("Vib -", QStyle.SP_ArrowDown)
+        self.vibrato_up_button = self._make_button("Vib +", QStyle.SP_ArrowUp)
+        self.scoop_button = self._make_button("Scoop Fix", QStyle.SP_ArrowUp)
+        self.fall_button = self._make_button("Fall Fix", QStyle.SP_ArrowUp)
+        self.formant_down_button = self._make_button("Formant -", QStyle.SP_ArrowDown)
+        self.formant_up_button = self._make_button("Formant +", QStyle.SP_ArrowUp)
         self.file_label = QLabel("No file loaded")
         self.file_label.setObjectName("MutedLabel")
         self.file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -118,11 +152,13 @@ class MainWindow(QMainWindow):
         self.open_button.clicked.connect(self.open_file)
         self.analyze_button.clicked.connect(self.analyze_pitch)
         self.play_button.clicked.connect(self.toggle_playback)
-        self.pitch_down_button.clicked.connect(lambda: self.apply_pitch_shift(-1.0))
-        self.pitch_up_button.clicked.connect(lambda: self.apply_pitch_shift(1.0))
+        self.pitch_down_button.clicked.connect(lambda: self.apply_selected_note_pitch_shift(-1.0))
+        self.pitch_up_button.clicked.connect(lambda: self.apply_selected_note_pitch_shift(1.0))
         self.export_button.clicked.connect(self.export_wav)
         self.waveform_view.selection_changed.connect(self._selection_changed)
         self.waveform_view.note_selected.connect(self._note_selected)
+        self.waveform_view.note_edited.connect(self._note_edited)
+        self.waveform_view.note_deleted.connect(self._note_deleted)
         self.detect_notes_button.clicked.connect(self.detect_notes)
         self.previous_note_button.clicked.connect(lambda: self.select_relative_note(-1))
         self.next_note_button.clicked.connect(lambda: self.select_relative_note(1))
@@ -132,6 +168,14 @@ class MainWindow(QMainWindow):
         self.note_start_later_button.clicked.connect(lambda: self.adjust_selected_note(start_delta=0.02))
         self.note_shorter_button.clicked.connect(lambda: self.adjust_selected_note(end_delta=-0.04))
         self.note_longer_button.clicked.connect(lambda: self.adjust_selected_note(end_delta=0.04))
+        self.snap_note_button.clicked.connect(self.snap_selected_note_to_scale)
+        self.snap_all_button.clicked.connect(self.snap_all_notes_to_scale)
+        self.vibrato_down_button.clicked.connect(lambda: self.apply_vibrato(-1.0))
+        self.vibrato_up_button.clicked.connect(lambda: self.apply_vibrato(1.0))
+        self.scoop_button.clicked.connect(lambda: self.correct_selected_transition("scoop"))
+        self.fall_button.clicked.connect(lambda: self.correct_selected_transition("fall"))
+        self.formant_down_button.clicked.connect(lambda: self.apply_formant_color(-1.0))
+        self.formant_up_button.clicked.connect(lambda: self.apply_formant_color(1.0))
         self.analyze_button.setEnabled(False)
         self.play_button.setEnabled(False)
         self.pitch_down_button.setEnabled(False)
@@ -139,6 +183,7 @@ class MainWindow(QMainWindow):
         self.export_button.setEnabled(False)
         self.detect_notes_button.setEnabled(False)
         self._set_note_controls_enabled(False)
+        self._set_phase4_controls_enabled(False)
 
         self._build_layout()
         self._set_state("Ready")
@@ -149,7 +194,6 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(12, 12, 12, 8)
         root_layout.setSpacing(10)
         root_layout.addWidget(self._top_bar())
-        root_layout.addWidget(self._note_bar())
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.waveform_view)
@@ -211,6 +255,33 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.note_start_later_button)
         layout.addWidget(self.note_shorter_button)
         layout.addWidget(self.note_longer_button)
+        layout.addStretch(1)
+        return bar
+
+    def _tone_bar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("TopBar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(8)
+
+        label = QLabel("Tone")
+        label.setObjectName("MutedLabel")
+        layout.addWidget(label)
+        layout.addSpacing(8)
+        layout.addWidget(self.scale_key_combo)
+        layout.addWidget(self.scale_mode_combo)
+        layout.addWidget(self.snap_note_button)
+        layout.addWidget(self.snap_all_button)
+        layout.addSpacing(8)
+        layout.addWidget(self.vibrato_down_button)
+        layout.addWidget(self.vibrato_up_button)
+        layout.addSpacing(8)
+        layout.addWidget(self.scoop_button)
+        layout.addWidget(self.fall_button)
+        layout.addSpacing(8)
+        layout.addWidget(self.formant_down_button)
+        layout.addWidget(self.formant_up_button)
         layout.addStretch(1)
         return bar
 
@@ -342,7 +413,7 @@ class MainWindow(QMainWindow):
 
         thread.started.connect(worker.run)
         worker.finished.connect(self._pitch_shift_finished)
-        worker.failed.connect(self._pitch_shift_failed)
+        worker.failed.connect(self._audio_operation_failed)
         worker.finished.connect(worker.deleteLater)
         worker.failed.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
@@ -386,8 +457,8 @@ class MainWindow(QMainWindow):
         self._set_state("Ready", f"shifted {edit.selection.duration:.2f} s by {edit.semitones:+.0f} semitone")
 
     @Slot(str)
-    def _pitch_shift_failed(self, message: str) -> None:
-        self._show_error(f"Pitch shift failed:\n{message}")
+    def _audio_operation_failed(self, message: str) -> None:
+        self._show_error(f"Audio edit failed:\n{message}")
         self._set_state("Ready")
 
     @Slot()
@@ -411,6 +482,53 @@ class MainWindow(QMainWindow):
     def _note_selected(self, index: int) -> None:
         self._select_note_index(index)
 
+    @Slot(int, float, float, float)
+    def _note_edited(self, index: int, start: float, end: float, midi_note: float) -> None:
+        if self.document is None or not 0 <= index < len(self.document.note_segments):
+            return
+
+        notes = list(self.document.note_segments)
+        notes[index] = notes[index].with_range(start, end).with_pitch(midi_note)
+        self.document.note_segments = notes
+        self.selected_note_index = index
+
+        note = notes[index]
+        self.waveform_view.set_note_segments(notes, index)
+        self.waveform_view.set_selection_range(note.start, note.end)
+        self.inspector_panel.set_notes(notes, index)
+        self.inspector_panel.set_selection_range(note.start, note.end)
+        self._update_edit_buttons()
+        self._update_note_buttons()
+        self._set_state("Ready", f"edited {note.note_name}")
+
+    @Slot(int)
+    def _note_deleted(self, index: int) -> None:
+        if self.document is None or not 0 <= index < len(self.document.note_segments):
+            return
+
+        deleted = self.document.note_segments[index]
+        notes = [
+            note.with_id(new_id)
+            for new_id, note in enumerate(
+                [
+                    note
+                    for item_index, note in enumerate(self.document.note_segments)
+                    if item_index != index
+                ]
+            )
+        ]
+        self.document.note_segments = notes
+        if not notes:
+            self.selected_note_index = None
+            self.waveform_view.set_note_segments([])
+            self.inspector_panel.set_notes([])
+            self._update_edit_buttons()
+            self._set_state("Ready", f"deleted {deleted.note_name}")
+            return
+
+        self._select_note_index(min(index, len(notes) - 1))
+        self._set_state("Ready", f"deleted {deleted.note_name}")
+
     def select_relative_note(self, offset: int) -> None:
         if self.document is None or not self.document.note_segments:
             return
@@ -425,13 +543,20 @@ class MainWindow(QMainWindow):
         self._select_note_index(next_index)
 
     def apply_selected_note_pitch_shift(self, semitones: float) -> None:
-        note = self._selected_note()
-        if note is None or self.document is None:
+        if self.document is None or self.selected_note_index is None:
+            self._set_state("Ready", "No note selected")
+            return
+        if not 0 <= self.selected_note_index < len(self.document.note_segments):
+            self._set_state("Ready", "No note selected")
             return
 
-        self._stop_playback()
-        self.waveform_view.set_selection_range(note.start, note.end)
-        self._start_pitch_shift(TimeRange(note.start, note.end), semitones)
+        notes = list(self.document.note_segments)
+        note = notes[self.selected_note_index]
+        notes[self.selected_note_index] = note.with_pitch(note.midi_note + semitones)
+        self.document.note_segments = notes
+
+        self._select_note_index(self.selected_note_index)
+        self._set_state("Ready", f"{notes[self.selected_note_index].note_name} {semitones:+.0f} semitone")
 
     def adjust_selected_note(self, start_delta: float = 0.0, end_delta: float = 0.0) -> None:
         if self.document is None or self.selected_note_index is None:
@@ -459,32 +584,171 @@ class MainWindow(QMainWindow):
         self._select_note_index(self.selected_note_index)
         self._set_state("Ready", f"adjusted {notes[self.selected_note_index].note_name}")
 
+    def snap_selected_note_to_scale(self) -> None:
+        note = self._selected_note()
+        if note is None:
+            return
+
+        delta = nearest_scale_delta(
+            note.midi_note,
+            self.scale_key_combo.currentText(),
+            self.scale_mode_combo.currentText(),
+        )
+        if abs(delta) < 0.03:
+            self._set_state("Ready", f"{note.note_name} is already on scale")
+            return
+
+        self._stop_playback()
+        selection = TimeRange(note.start, note.end)
+        self.waveform_view.set_selection_range(note.start, note.end)
+        self._start_pitch_shift(selection, delta)
+
+    def snap_all_notes_to_scale(self) -> None:
+        if self.document is None or not self.document.note_segments:
+            return
+
+        edits: list[PitchEdit] = []
+        for note in self.document.note_segments:
+            delta = nearest_scale_delta(
+                note.midi_note,
+                self.scale_key_combo.currentText(),
+                self.scale_mode_combo.currentText(),
+            )
+            if abs(delta) >= 0.03:
+                edits.append(PitchEdit(selection=TimeRange(note.start, note.end), semitones=delta))
+
+        if not edits:
+            self._set_state("Ready", "all notes already on scale")
+            return
+
+        self._stop_playback()
+        select_time = self._selected_note_center()
+
+        def operation():
+            edited, frames, applied = AudioEditor.pitch_shift_edits(self.document, edits)
+            return edited, frames, applied, select_time
+
+        self._start_audio_operation("Snapping", operation)
+
+    def apply_vibrato(self, amount: float) -> None:
+        selection = self._active_edit_range()
+        if self.document is None or selection is None:
+            return
+
+        self._stop_playback()
+        select_time = selection.start + selection.duration * 0.5
+
+        def operation():
+            edited, frames, edit = AudioEditor.apply_vibrato_range(
+                self.document,
+                selection,
+                amount,
+            )
+            return edited, frames, [edit], select_time
+
+        self._start_audio_operation("Vibrato", operation)
+
+    def correct_selected_transition(self, mode: str) -> None:
+        note = self._selected_note()
+        if self.document is None or note is None:
+            return
+
+        self._stop_playback()
+        select_time = note.start + note.duration * 0.5
+
+        def operation():
+            edited, frames, edits = AudioEditor.correct_transition(self.document, note, mode)
+            return edited, frames, edits, select_time
+
+        label = "Scoop" if mode == "scoop" else "Fall"
+        self._start_audio_operation(label, operation)
+
+    def apply_formant_color(self, amount: float) -> None:
+        selection = self._active_edit_range()
+        if self.document is None or selection is None:
+            return
+
+        self._stop_playback()
+        select_time = selection.start + selection.duration * 0.5
+
+        def operation():
+            edited, frames, edit = AudioEditor.formant_color_range(
+                self.document,
+                selection,
+                amount,
+            )
+            return edited, frames, [edit], select_time
+
+        self._start_audio_operation("Formant", operation)
+
+    def _start_audio_operation(self, label: str, operation) -> None:  # noqa: ANN001
+        if self.document is None or self.edit_thread is not None:
+            return
+
+        self._set_state(label, "processing")
+        self._set_controls_enabled(False)
+
+        thread = QThread(self)
+        worker = AudioOperationWorker(operation)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._audio_operation_finished)
+        worker.failed.connect(self._audio_operation_failed)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._pitch_shift_cleanup)
+
+        self.edit_thread = thread
+        self.edit_worker = worker
+        thread.start()
+
+    @Slot(object, object, object, object)
+    def _audio_operation_finished(
+        self,
+        edited_samples,
+        frames: list[PitchFrame],
+        edits,
+        select_time,
+    ) -> None:
+        if self.document is None:
+            return
+
+        had_notes = bool(self.document.note_segments)
+        self.document.apply_audio_edits(edited_samples, frames, edits)
+        self.waveform_view.set_audio(self.document)
+        self.waveform_view.set_pitch_frames(self.document.pitch_frames)
+        self.inspector_panel.set_document(self.document)
+        self.inspector_panel.set_pitch_frames(self.document.pitch_frames)
+
+        if had_notes:
+            self._refresh_notes_from_pitch(select_time=select_time)
+        else:
+            self.document.note_segments = []
+            self.selected_note_index = None
+            self.waveform_view.set_note_segments([])
+            self.inspector_panel.set_notes([])
+            if edits:
+                selection = edits[0].selection
+                self.waveform_view.set_selection_range(selection.start, selection.end)
+                self.inspector_panel.set_selection_range(selection.start, selection.end)
+
+        self.inspector_panel.set_edit_count(len(self.document.edit_history))
+        self._set_state("Ready", f"applied {len(edits)} edit(s)")
+
     @Slot()
     def export_wav(self) -> None:
         if self.document is None:
             return
-
-        suggested = self.document.file_path.with_name(f"{self.document.file_path.stem}_voclay.wav")
-        file_path, _ = QFileDialog.getSaveFileName(
+        QMessageBox.information(
             self,
-            "Export WAV",
-            str(suggested),
-            "WAV files (*.wav)",
+            "VoClay",
+            "Export is not implemented yet. Note edit data is ready for future rendering.",
         )
-        if not file_path:
-            return
-
-        path = Path(file_path)
-        if path.suffix.lower() != ".wav":
-            path = path.with_suffix(".wav")
-
-        try:
-            self.document.export_wav(path)
-        except Exception as exc:  # noqa: BLE001
-            self._show_error(f"Could not export WAV file:\n{exc}")
-            return
-
-        self._set_state("Ready", f"exported {path.name}")
+        self._set_state("Ready", "export not implemented")
 
     @Slot()
     def toggle_playback(self) -> None:
@@ -530,19 +794,21 @@ class MainWindow(QMainWindow):
         self._update_edit_buttons()
 
     def _update_edit_buttons(self) -> None:
-        can_edit = (
+        has_selected_note = (
             self.document is not None
             and self.edit_thread is None
-            and self.waveform_view.selection_range() is not None
+            and bool(self.document.note_segments)
+            and self.selected_note_index is not None
         )
-        self.pitch_down_button.setEnabled(can_edit)
-        self.pitch_up_button.setEnabled(can_edit)
+        self.pitch_down_button.setEnabled(has_selected_note)
+        self.pitch_up_button.setEnabled(has_selected_note)
         self.detect_notes_button.setEnabled(
             self.document is not None
             and bool(self.document.pitch_frames)
             and self.edit_thread is None
         )
         self._update_note_buttons()
+        self._update_phase4_buttons()
 
     def _update_note_buttons(self) -> None:
         has_notes = (
@@ -552,6 +818,9 @@ class MainWindow(QMainWindow):
             and self.edit_thread is None
         )
         self._set_note_controls_enabled(has_notes)
+        self.pitch_down_button.setEnabled(has_notes)
+        self.pitch_up_button.setEnabled(has_notes)
+        self._update_phase4_buttons()
 
     def _set_note_controls_enabled(self, enabled: bool) -> None:
         for button in (
@@ -566,6 +835,39 @@ class MainWindow(QMainWindow):
         ):
             button.setEnabled(enabled)
 
+    def _update_phase4_buttons(self) -> None:
+        can_process = self.document is not None and self.edit_thread is None
+        has_pitch = can_process and bool(self.document.pitch_frames)
+        has_notes = can_process and bool(self.document.note_segments)
+        has_note = has_notes and self.selected_note_index is not None
+        has_range = can_process and self.waveform_view.selection_range() is not None
+
+        self.scale_key_combo.setEnabled(has_notes)
+        self.scale_mode_combo.setEnabled(has_notes)
+        self.snap_note_button.setEnabled(has_note)
+        self.snap_all_button.setEnabled(has_notes)
+        self.vibrato_down_button.setEnabled(has_pitch and has_range)
+        self.vibrato_up_button.setEnabled(has_pitch and has_range)
+        self.scoop_button.setEnabled(has_note)
+        self.fall_button.setEnabled(has_note)
+        self.formant_down_button.setEnabled(has_range)
+        self.formant_up_button.setEnabled(has_range)
+
+    def _set_phase4_controls_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.scale_key_combo,
+            self.scale_mode_combo,
+            self.snap_note_button,
+            self.snap_all_button,
+            self.vibrato_down_button,
+            self.vibrato_up_button,
+            self.scoop_button,
+            self.fall_button,
+            self.formant_down_button,
+            self.formant_up_button,
+        ):
+            widget.setEnabled(enabled)
+
     def _set_controls_enabled(self, enabled: bool) -> None:
         self.open_button.setEnabled(enabled)
         self.analyze_button.setEnabled(enabled and self.document is not None)
@@ -579,10 +881,12 @@ class MainWindow(QMainWindow):
         if enabled:
             self._update_edit_buttons()
             self._update_note_buttons()
+            self._update_phase4_buttons()
         else:
             self.pitch_down_button.setEnabled(False)
             self.pitch_up_button.setEnabled(False)
             self._set_note_controls_enabled(False)
+            self._set_phase4_controls_enabled(False)
 
     def _refresh_notes_from_pitch(self, select_time: float | None = None) -> int:
         if self.document is None:
@@ -639,6 +943,7 @@ class MainWindow(QMainWindow):
         self.inspector_panel.set_notes(self.document.note_segments, index)
         self.inspector_panel.set_selection_range(note.start, note.end)
         self._update_note_buttons()
+        self._update_phase4_buttons()
 
     def _selected_note(self) -> NoteSegment | None:
         if self.document is None or self.selected_note_index is None:
@@ -646,6 +951,24 @@ class MainWindow(QMainWindow):
         if not 0 <= self.selected_note_index < len(self.document.note_segments):
             return None
         return self.document.note_segments[self.selected_note_index]
+
+    def _selected_note_center(self) -> float | None:
+        note = self._selected_note()
+        if note is None:
+            return None
+        return note.start + note.duration * 0.5
+
+    def _active_edit_range(self) -> TimeRange | None:
+        note = self._selected_note()
+        if note is not None:
+            return TimeRange(note.start, note.end)
+
+        selection = self.waveform_view.selection_range()
+        if selection is None:
+            return None
+        if self.document is None:
+            return None
+        return TimeRange(selection[0], selection[1]).normalized(self.document.duration)
 
     def _set_state(self, state: str, detail: str | None = None) -> None:
         message = state if not detail else f"{state} - {detail}"

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from statistics import mean
-
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QLabel,
-    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -39,11 +36,15 @@ class InspectorPanel(QFrame):
         self.duration = QLabel("-")
         self.pitch_range = QLabel("-")
         self.pitch_frames = QLabel("-")
-        self.confidence = QLabel("-")
-        self.selection = QLabel("-")
         self.notes = QLabel("-")
         self.selected_note = QLabel("-")
         self.edits = QLabel("0")
+        self.note_start = QLabel("-")
+        self.note_end = QLabel("-")
+        self.note_length = QLabel("-")
+        self.note_midi = QLabel("-")
+        self.note_name = QLabel("-")
+        self.note_cents = QLabel("-")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -51,7 +52,7 @@ class InspectorPanel(QFrame):
         layout.addWidget(self.logo_label)
         layout.addWidget(self._section("File", self._file_form()))
         layout.addWidget(self._section("Analysis", self._analysis_form()))
-        layout.addWidget(self._section("Future Controls", self._future_controls()))
+        layout.addWidget(self._section("Selected note", self._selected_note_form()))
         layout.addStretch(1)
 
     def clear(self) -> None:
@@ -61,11 +62,10 @@ class InspectorPanel(QFrame):
         self.duration.setText("-")
         self.pitch_range.setText("-")
         self.pitch_frames.setText("-")
-        self.confidence.setText("-")
-        self.selection.setText("-")
         self.notes.setText("-")
         self.selected_note.setText("-")
         self.edits.setText("0")
+        self._clear_selected_note_detail()
 
     def set_document(self, document: AudioDocument) -> None:
         self.file_name.setText(document.file_name)
@@ -74,11 +74,10 @@ class InspectorPanel(QFrame):
         self.duration.setText(f"{document.duration:.2f} s")
         self.pitch_range.setText("-")
         self.pitch_frames.setText("-")
-        self.confidence.setText("-")
-        self.selection.setText("-")
-        self.notes.setText(str(len(document.note_segments)) if document.note_segments else "-")
+        self.notes.setText(str(len(document.vocal_notes)) if document.vocal_notes else "-")
         self.selected_note.setText("-")
         self.edits.setText(str(len(document.edit_history)))
+        self._clear_selected_note_detail()
 
     def set_pitch_frames(self, frames: list[PitchFrame]) -> None:
         voiced = [frame for frame in frames if frame.voiced and frame.f0 is not None]
@@ -86,24 +85,13 @@ class InspectorPanel(QFrame):
 
         if not voiced:
             self.pitch_range.setText("-")
-            self.confidence.setText("-")
             return
 
         f0_values = [float(frame.f0) for frame in voiced if frame.f0 is not None]
         self.pitch_range.setText(f"{min(f0_values):.1f} - {max(f0_values):.1f} Hz")
 
-        confidence_values = [
-            frame.confidence
-            for frame in voiced
-            if frame.confidence is not None
-        ]
-        if confidence_values:
-            self.confidence.setText(f"{mean(confidence_values):.2f} avg")
-        else:
-            self.confidence.setText("-")
-
     def set_selection_range(self, start: float, end: float) -> None:
-        self.selection.setText(f"{start:.2f} - {end:.2f} s ({max(0.0, end - start):.2f} s)")
+        pass
 
     def set_edit_count(self, count: int) -> None:
         self.edits.setText(str(count))
@@ -112,12 +100,17 @@ class InspectorPanel(QFrame):
         self.notes.setText(str(len(notes)) if notes else "-")
         if selected_index is None or not 0 <= selected_index < len(notes):
             self.selected_note.setText("-")
+            self._clear_selected_note_detail()
             return
 
         note = notes[selected_index]
-        self.selected_note.setText(
-            f"{note.note_name}  {note.start:.2f}-{note.end:.2f} s"
-        )
+        self.selected_note.setText(f"{note.note_name}  {note.start:.2f}-{note.end:.2f} s")
+        self.note_start.setText(f"{note.start:.2f} s")
+        self.note_end.setText(f"{note.end:.2f} s")
+        self.note_length.setText(f"{note.duration:.2f} s")
+        self.note_midi.setText(str(int(round(note.midi_note))))
+        self.note_name.setText(note.note_name)
+        self.note_cents.setText(f"{note.cents_offset:+.1f} cents")
 
     def _file_form(self) -> QFormLayout:
         form = QFormLayout()
@@ -133,27 +126,29 @@ class InspectorPanel(QFrame):
         form.setLabelAlignment(Qt.AlignLeft)
         form.addRow("Pitch range", self.pitch_range)
         form.addRow("Frames", self.pitch_frames)
-        form.addRow("Confidence", self.confidence)
-        form.addRow("Selection", self.selection)
         form.addRow("Notes", self.notes)
         form.addRow("Selected note", self.selected_note)
         form.addRow("Edits", self.edits)
         return form
 
-    def _future_controls(self) -> QWidget:
-        holder = QWidget()
-        layout = QFormLayout(holder)
-        layout.setLabelAlignment(Qt.AlignLeft)
+    def _selected_note_form(self) -> QFormLayout:
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.addRow("Start", self.note_start)
+        form.addRow("End", self.note_end)
+        form.addRow("Length", self.note_length)
+        form.addRow("MIDI note", self.note_midi)
+        form.addRow("Note name", self.note_name)
+        form.addRow("Cents offset", self.note_cents)
+        return form
 
-        for label in ("Pitch", "Timing", "Smooth", "Vibrato"):
-            slider = QSlider(Qt.Horizontal)
-            slider.setRange(-100, 100)
-            slider.setValue(0)
-            slider.setEnabled(False)
-            slider.setToolTip("Reserved for later editing features")
-            layout.addRow(label, slider)
-
-        return holder
+    def _clear_selected_note_detail(self) -> None:
+        self.note_start.setText("-")
+        self.note_end.setText("-")
+        self.note_length.setText("-")
+        self.note_midi.setText("-")
+        self.note_name.setText("-")
+        self.note_cents.setText("-")
 
     def _section(self, title: str, content: QWidget | QFormLayout) -> QWidget:
         wrapper = QWidget()

@@ -2,21 +2,21 @@ from __future__ import annotations
 
 from statistics import mean, median
 
-from voclay.app.models import NoteSegment, PitchFrame
+from voclay.app.models import PitchFrame, PitchPoint, VocalNote
 
 
 class NoteSegmenter:
     def __init__(
         self,
         min_duration: float = 0.08,
-        max_gap: float = 0.16,
-        pitch_split_semitones: float = 1.25,
+        max_gap: float = 0.08,
+        pitch_split_semitones: float = 0.7,
     ) -> None:
         self.min_duration = min_duration
         self.max_gap = max_gap
         self.pitch_split_semitones = pitch_split_semitones
 
-    def segment(self, frames: list[PitchFrame], duration: float) -> list[NoteSegment]:
+    def segment(self, frames: list[PitchFrame], duration: float) -> list[VocalNote]:
         voiced_frames = [
             frame
             for frame in frames
@@ -54,7 +54,7 @@ class NoteSegmenter:
         if current:
             groups.append(current)
 
-        notes: list[NoteSegment] = []
+        notes: list[VocalNote] = []
         for group in groups:
             note = self._group_to_note(len(notes), group, frame_step, duration)
             if note is not None:
@@ -68,7 +68,7 @@ class NoteSegmenter:
         group: list[PitchFrame],
         frame_step: float,
         duration: float,
-    ) -> NoteSegment | None:
+    ) -> VocalNote | None:
         start = max(0.0, group[0].time - frame_step * 0.5)
         end = min(duration, group[-1].time + frame_step * 0.5)
         if end - start < self.min_duration:
@@ -85,14 +85,29 @@ class NoteSegmenter:
             if frame.confidence is not None
         ]
         confidence = mean(confidence_values) if confidence_values else None
+        original_midi_median = median(midi_values)
+        rounded_midi = int(round(original_midi_median))
 
-        return NoteSegment(
+        return VocalNote(
             id=note_id,
-            start=start,
-            end=end,
-            midi_note=median(midi_values),
-            average_f0=median(f0_values),
+            start_time=start,
+            end_time=end,
+            midi_note=rounded_midi,
+            cents_offset=(original_midi_median - rounded_midi) * 100.0,
+            original_midi_median=original_midi_median,
+            pitch_points=tuple(
+                PitchPoint(
+                    time=frame.time,
+                    f0=frame.f0,
+                    midi=frame.midi_note,
+                    voiced=frame.voiced,
+                )
+                for frame in group
+                if frame.f0 is not None and frame.midi_note is not None
+            ),
             confidence=confidence,
+            voiced=True,
+            average_f0=median(f0_values),
         )
 
     def _estimate_frame_step(self, frames: list[PitchFrame]) -> float:

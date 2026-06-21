@@ -1,25 +1,27 @@
 # VoClay
 
 VoClay is an offline desktop MVP for vocal audio editing. It can open WAV files,
-show a waveform, estimate the vocal pitch curve, shift the pitch of a selected
-range or detected note, display editable note blocks, export WAV files, and play
+estimate the vocal pitch curve, convert voiced regions into note events, edit
+those events in a piano-roll style note block view, export WAV files, and play
 the file with a moving playhead.
 
-The current build covers Phase 1, Phase 2, and a first Phase 3 note-editing pass:
+The current build is focused on the note-block editing workflow:
 
 - WAV loading
-- waveform display
+- Melodyne-style main note editor with a left piano keyboard and time grid
 - pitch analysis with `librosa.pyin`
-- MIDI-style pitch curve display
+- automatic `VocalNote` generation from F0 frames when `Analyze` completes
+- auxiliary MIDI pitch curve display behind the note blocks
 - play and stop controls
 - playhead display
 - draggable time range selection
-- selected-range pitch shifting by semitone
 - automatic note segmentation from the detected pitch curve
-- note block display on the pitch view
-- note-by-note semitone pitch shifting
-- note block start and length adjustment
-- WAV export of the edited audio
+- note block display from detected vocal note events
+- block drag editing for note pitch and timing
+- left/right edge drag editing for note length
+- Delete and arrow-key editing for the selected note block
+- selected note semitone changes from the top toolbar
+- export placeholder for the future rendering pass
 - internal edit history for later pitch and timing editing
 
 ## Requirements
@@ -43,23 +45,22 @@ python voclay/main.py
 ## Use
 
 1. Click `Open` and choose a `.wav` file.
-2. Confirm that the waveform appears.
-3. Click `Analyze` to estimate the pitch.
-4. Drag the highlighted range on the waveform or pitch view.
-5. Click `-1 semitone` or `+1 semitone` to shift the selected range.
-6. Use the `Notes` bar to detect/select note blocks and move a selected note by
-   semitone.
-7. Use `Start -`, `Start +`, `Shorter`, and `Longer` to adjust the selected note
-   block boundary.
-8. Use `Play` / `Stop` to hear the current edited audio and watch the playhead.
-9. Click `Export WAV` to write the edited audio to disk.
+2. Click `Analyze` to estimate the vocal F0 curve and build note blocks.
+3. Edit in the main note view: drag a block up/down for pitch, left/right for
+   timing, or drag its left/right edge to change length.
+4. Use Delete to remove the selected note block, or arrow keys to nudge pitch
+   and timing.
+5. Click `-1 semitone` or `+1 semitone` to move the selected note block.
+6. Use `Play` / `Stop` to hear the loaded audio and watch the playhead.
+7. `Export WAV` is present but intentionally shows a placeholder message until
+   note-based rendering is implemented.
 
 Stereo files are converted to mono for analysis. Playback uses the loaded audio
-data directly when possible. Pitch shifting is intentionally simple in this MVP:
-it processes the selected range and blends the edges lightly to reduce clicks.
-Note pitch edits affect the exported audio. Note start and length controls adjust
-the note block model for the next editing phase; full timing audio transformation
-is still future work.
+data directly when possible. Direct note block editing updates the internal
+`VocalNote` model (`start_time`, `end_time`, `midi_note`, `cents_offset`,
+`original_midi_median`, and `pitch_points`) so the project is structured for a
+later resynthesis/WAV rendering pass. Full audio resynthesis from dragged note
+timing and pitch is still future work.
 
 ## Project Layout
 
@@ -74,6 +75,7 @@ voclay/
     models.py
     note_segmenter.py
     pitch_analyzer.py
+    scale_tools.py
     theme.py
     widgets/
       inspector_panel.py
