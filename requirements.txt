@@ -4,3 +4,4 @@ soundfile>=0.12
 librosa>=0.10
 pyqtgraph>=0.13
 sounddevice>=0.4
+pyinstaller>=6.0

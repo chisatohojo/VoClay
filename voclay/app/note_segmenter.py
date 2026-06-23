@@ -3,7 +3,7 @@ from __future__ import annotations
 from statistics import mean, median
 from typing import Protocol
 
-from voclay.app.models import ChordChange, PitchFrame, PitchPoint, VocalNote
+from voclay.app.models import PitchFrame, PitchPoint, VocalNote
 
 
 class PitchLike(Protocol):
@@ -20,19 +20,18 @@ class NoteSegmenter:
         max_gap: float = 0.08,
         pitch_split_semitones: float = 0.7,
         abrupt_split_semitones: float = 1.2,
-        chord_split_min_side: float = 0.12,
     ) -> None:
         self.min_duration = min_duration
         self.max_gap = max_gap
         self.pitch_split_semitones = pitch_split_semitones
         self.abrupt_split_semitones = abrupt_split_semitones
-        self.chord_split_min_side = chord_split_min_side
 
     def segment(
         self,
         frames: list[PitchFrame] | list[PitchPoint],
         duration: float,
-        chord_changes: list[ChordChange] | None = None,
+        track_type: str = "source",
+        locked: bool = False,
     ) -> list[VocalNote]:
         voiced_frames = [
             frame
@@ -83,11 +82,18 @@ class NoteSegmenter:
 
         notes: list[VocalNote] = []
         for group, split_reason in groups:
-            note = self._group_to_note(len(notes), group, frame_step, duration, split_reason)
+            note = self._group_to_note(
+                len(notes),
+                group,
+                frame_step,
+                duration,
+                split_reason,
+                track_type,
+                locked,
+            )
             if note is not None:
                 notes.append(note)
 
-        notes = self._apply_chord_splits(notes, chord_changes or [])
         return [note.with_id(index) for index, note in enumerate(notes)]
 
     def _group_to_note(
@@ -97,6 +103,8 @@ class NoteSegmenter:
         frame_step: float,
         duration: float,
         split_reason: str,
+        track_type: str,
+        locked: bool,
     ) -> VocalNote | None:
         start = max(0.0, group[0].time - frame_step * 0.5)
         end = min(duration, group[-1].time + frame_step * 0.5)
@@ -113,6 +121,8 @@ class NoteSegmenter:
                 if self._midi(frame) is not None and frame.f0 is not None
             ],
             split_reason=split_reason,
+            track_type=track_type,
+            locked=locked,
         )
 
     def _points_to_note(
@@ -122,6 +132,8 @@ class NoteSegmenter:
         end: float,
         points: list[PitchPoint],
         split_reason: str,
+        track_type: str = "source",
+        locked: bool = False,
     ) -> VocalNote | None:
         if end - start < self.min_duration:
             return None
@@ -144,55 +156,18 @@ class NoteSegmenter:
             start_time=start,
             end_time=end,
             midi_note=rounded_midi,
+            track_type=track_type,
+            original_start_time=start,
+            original_end_time=end,
             cents_offset=(original_midi_median - rounded_midi) * 100.0,
             original_midi_median=original_midi_median,
             pitch_points=tuple(points),
             split_reason=split_reason,
+            locked=locked,
             confidence=confidence,
             voiced=True,
             average_f0=median(f0_values),
         )
-
-    def _apply_chord_splits(
-        self,
-        notes: list[VocalNote],
-        chord_changes: list[ChordChange],
-    ) -> list[VocalNote]:
-        if not notes or not chord_changes:
-            return notes
-
-        output: list[VocalNote] = []
-        for note in notes:
-            pending = [note]
-            for change in chord_changes:
-                next_pending: list[VocalNote] = []
-                for item in pending:
-                    if not item.start + self.chord_split_min_side <= change.time <= item.end - self.chord_split_min_side:
-                        next_pending.append(item)
-                        continue
-                    before_points = [point for point in item.pitch_points if point.time <= change.time]
-                    after_points = [point for point in item.pitch_points if point.time >= change.time]
-                    before = self._points_to_note(
-                        note_id=0,
-                        start=item.start,
-                        end=change.time,
-                        points=before_points,
-                        split_reason=item.split_reason,
-                    )
-                    after = self._points_to_note(
-                        note_id=0,
-                        start=change.time,
-                        end=item.end,
-                        points=after_points,
-                        split_reason="chord_change",
-                    )
-                    if before is None or after is None:
-                        next_pending.append(item)
-                    else:
-                        next_pending.extend([before, after])
-                pending = next_pending
-            output.extend(pending)
-        return output
 
     def _to_pitch_point(self, frame: PitchLike) -> PitchPoint:
         return PitchPoint(

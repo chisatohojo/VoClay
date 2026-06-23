@@ -94,34 +94,29 @@ class PitchPoint:
 
 
 @dataclass(frozen=True)
-class ChordFrame:
-    time: float
-    chord_label: str
-    confidence: float | None = None
-
-
-@dataclass(frozen=True)
-class ChordChange:
-    time: float
-    prev_chord: str
-    next_chord: str
-    confidence: float | None = None
-
-
-@dataclass(frozen=True)
 class VocalNote:
     id: int
     start_time: float
     end_time: float
     midi_note: int
+    track_type: str = "source"
+    original_start_time: float | None = None
+    original_end_time: float | None = None
     cents_offset: float = 0.0
     original_midi_median: float = 0.0
     pitch_points: tuple[PitchPoint, ...] = field(default_factory=tuple)
     split_reason: str = "pitch_change"
     selected: bool = False
+    locked: bool = False
     confidence: float | None = None
     voiced: bool = True
     average_f0: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.original_start_time is None:
+            object.__setattr__(self, "original_start_time", self.start_time)
+        if self.original_end_time is None:
+            object.__setattr__(self, "original_end_time", self.end_time)
 
     @property
     def duration(self) -> float:
@@ -136,6 +131,18 @@ class VocalNote:
         return self.end_time
 
     @property
+    def original_start(self) -> float:
+        return float(self.original_start_time if self.original_start_time is not None else self.start_time)
+
+    @property
+    def original_end(self) -> float:
+        return float(self.original_end_time if self.original_end_time is not None else self.end_time)
+
+    @property
+    def pitch_shift_semitones(self) -> float:
+        return float(self.midi_note - self.original_midi_median)
+
+    @property
     def note_name(self) -> str:
         names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
         rounded = int(round(self.midi_note))
@@ -143,22 +150,7 @@ class VocalNote:
         return f"{names[rounded % 12]}{octave}"
 
     def shifted(self, semitones: float) -> "VocalNote":
-        midi_note = int(round(self.midi_note + semitones))
-        average_f0 = self.average_f0 * pow(2.0, semitones / 12.0)
-        return VocalNote(
-            id=self.id,
-            start_time=self.start_time,
-            end_time=self.end_time,
-            midi_note=midi_note,
-            cents_offset=self.cents_offset,
-            original_midi_median=self.original_midi_median + semitones,
-            pitch_points=tuple(point.shifted(semitones) for point in self.pitch_points),
-            split_reason=self.split_reason,
-            selected=self.selected,
-            confidence=self.confidence,
-            voiced=self.voiced,
-            average_f0=average_f0,
-        )
+        return self.with_pitch(self.midi_note + semitones)
 
     def with_id(self, note_id: int) -> "VocalNote":
         return VocalNote(
@@ -166,11 +158,15 @@ class VocalNote:
             start_time=self.start_time,
             end_time=self.end_time,
             midi_note=self.midi_note,
+            track_type=self.track_type,
+            original_start_time=self.original_start,
+            original_end_time=self.original_end,
             cents_offset=self.cents_offset,
             original_midi_median=self.original_midi_median,
             pitch_points=self.pitch_points,
             split_reason=self.split_reason,
             selected=self.selected,
+            locked=self.locked,
             confidence=self.confidence,
             voiced=self.voiced,
             average_f0=self.average_f0,
@@ -179,55 +175,110 @@ class VocalNote:
     def with_pitch(self, midi_note: float) -> "VocalNote":
         midi_note = int(round(midi_note))
         average_f0 = 440.0 * pow(2.0, (midi_note - 69.0) / 12.0)
-        factor = average_f0 / self.average_f0 if self.average_f0 > 0 else 1.0
-        delta = midi_note - self.midi_note
         return VocalNote(
             id=self.id,
             start_time=self.start_time,
             end_time=self.end_time,
             midi_note=midi_note,
-            cents_offset=(self.original_midi_median + delta - midi_note) * 100.0,
-            original_midi_median=self.original_midi_median + delta,
-            pitch_points=tuple(point.shifted(delta, factor) for point in self.pitch_points),
+            track_type=self.track_type,
+            original_start_time=self.original_start,
+            original_end_time=self.original_end,
+            cents_offset=(self.original_midi_median - midi_note) * 100.0,
+            original_midi_median=self.original_midi_median,
+            pitch_points=self.pitch_points,
             split_reason=self.split_reason,
             selected=self.selected,
+            locked=self.locked,
             confidence=self.confidence,
             voiced=self.voiced,
             average_f0=average_f0,
         )
 
     def with_range(self, start: float, end: float) -> "VocalNote":
-        old_duration = self.duration
-        new_duration = max(0.0, end - start)
-        if self.pitch_points and abs(old_duration - new_duration) < 0.001:
-            offset = start - self.start_time
-            pitch_points = tuple(point.with_time(point.time + offset) for point in self.pitch_points)
-        elif self.pitch_points:
-            pitch_points = tuple(
-                point
-                for point in self.pitch_points
-                if start <= point.time <= end
-            )
-            if not pitch_points:
-                pitch_points = self.pitch_points
-        else:
-            pitch_points = self.pitch_points
-
         return VocalNote(
             id=self.id,
             start_time=start,
             end_time=end,
             midi_note=self.midi_note,
+            track_type=self.track_type,
+            original_start_time=self.original_start,
+            original_end_time=self.original_end,
             cents_offset=self.cents_offset,
             original_midi_median=self.original_midi_median,
-            pitch_points=pitch_points,
+            pitch_points=self.pitch_points,
             split_reason=self.split_reason,
             selected=self.selected,
+            locked=self.locked,
             confidence=self.confidence,
             voiced=self.voiced,
             average_f0=self.average_f0,
         )
 
+    def with_original_range(
+        self,
+        original_start: float,
+        original_end: float,
+        pitch_points: tuple[PitchPoint, ...] | None = None,
+        split_reason: str | None = None,
+    ) -> "VocalNote":
+        return VocalNote(
+            id=self.id,
+            start_time=self.start_time,
+            end_time=self.end_time,
+            midi_note=self.midi_note,
+            track_type=self.track_type,
+            original_start_time=original_start,
+            original_end_time=original_end,
+            cents_offset=self.cents_offset,
+            original_midi_median=self.original_midi_median,
+            pitch_points=self.pitch_points if pitch_points is None else pitch_points,
+            split_reason=self.split_reason if split_reason is None else split_reason,
+            selected=self.selected,
+            locked=self.locked,
+            confidence=self.confidence,
+            voiced=self.voiced,
+            average_f0=self.average_f0,
+        )
+
+    def with_track(self, track_type: str, locked: bool) -> "VocalNote":
+        return VocalNote(
+            id=self.id,
+            start_time=self.start_time,
+            end_time=self.end_time,
+            midi_note=self.midi_note,
+            track_type=track_type,
+            original_start_time=self.original_start,
+            original_end_time=self.original_end,
+            cents_offset=self.cents_offset,
+            original_midi_median=self.original_midi_median,
+            pitch_points=self.pitch_points,
+            split_reason=self.split_reason,
+            selected=self.selected,
+            locked=locked,
+            confidence=self.confidence,
+            voiced=self.voiced,
+            average_f0=self.average_f0,
+        )
+
+    def with_split_reason(self, split_reason: str) -> "VocalNote":
+        return VocalNote(
+            id=self.id,
+            start_time=self.start_time,
+            end_time=self.end_time,
+            midi_note=self.midi_note,
+            track_type=self.track_type,
+            original_start_time=self.original_start,
+            original_end_time=self.original_end,
+            cents_offset=self.cents_offset,
+            original_midi_median=self.original_midi_median,
+            pitch_points=self.pitch_points,
+            split_reason=split_reason,
+            selected=self.selected,
+            locked=self.locked,
+            confidence=self.confidence,
+            voiced=self.voiced,
+            average_f0=self.average_f0,
+        )
 
     def with_selected(self, selected: bool) -> "VocalNote":
         return VocalNote(
@@ -235,11 +286,15 @@ class VocalNote:
             start_time=self.start_time,
             end_time=self.end_time,
             midi_note=self.midi_note,
+            track_type=self.track_type,
+            original_start_time=self.original_start,
+            original_end_time=self.original_end,
             cents_offset=self.cents_offset,
             original_midi_median=self.original_midi_median,
             pitch_points=self.pitch_points,
             split_reason=self.split_reason,
             selected=selected,
+            locked=self.locked,
             confidence=self.confidence,
             voiced=self.voiced,
             average_f0=self.average_f0,

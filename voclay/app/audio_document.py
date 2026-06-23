@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from voclay.app.models import AudioEffectEdit, ChordChange, ChordFrame, PitchEdit, PitchFrame, VocalNote
+from voclay.app.models import AudioEffectEdit, PitchEdit, PitchFrame, PitchPoint, VocalNote
 
 
 AudioEdit = PitchEdit | AudioEffectEdit
@@ -21,17 +21,13 @@ class AudioDocument:
     channels: int
     source_file_path: Path | None = None
     analysis_audio_path: Path | None = None
-    input_mode: str = "Vocal Only"
+    input_mode: str = "Source"
     vocal_stem_path: Path | None = None
     accompaniment_stem_path: Path | None = None
     analysis_samples: np.ndarray | None = None
     analysis_mono_samples_data: np.ndarray | None = None
     analysis_sample_rate: int | None = None
     pitch_frames: list[PitchFrame] = field(default_factory=list)
-    chord_frames: list[ChordFrame] = field(default_factory=list)
-    chord_changes: list[ChordChange] = field(default_factory=list)
-    vocal_separation_message: str = "Not run"
-    chord_analysis_message: str = "Not run"
     vocal_notes: list[VocalNote] = field(default_factory=list)
     edited_samples: np.ndarray | None = None
     edit_history: list[AudioEdit] = field(default_factory=list)
@@ -121,6 +117,19 @@ class AudioDocument:
     @note_segments.setter
     def note_segments(self, notes: list[VocalNote]) -> None:
         self.vocal_notes = notes
+
+    @property
+    def pitch_points(self) -> list[PitchPoint]:
+        return [
+            PitchPoint(
+                time=frame.time,
+                f0=frame.f0,
+                midi=frame.midi_note,
+                voiced=frame.voiced,
+                confidence=frame.confidence,
+            )
+            for frame in self.pitch_frames
+        ]
 
     def set_input_mode(self, input_mode: str) -> None:
         self.input_mode = input_mode
