@@ -21,6 +21,10 @@ material.
 - Drag Source Notes left/right for timing and up/down for pitch
 - Resize Source Notes from left/right edges
 - Shift-click or range-drag to select multiple Source Notes
+- Choose `Edit Scope`: `Selected Notes` or `All Source Notes`
+- Move either selected Source Notes or all Source Notes together
+- Ctrl + mouse wheel zooms the time axis
+- Mouse wheel scrolls the timeline horizontally
 - Split selected Source Note at the playhead with `S`
 - Merge selected Source Notes with `M`
 - Delete selected Source Notes with Delete/Backspace
@@ -69,9 +73,25 @@ python voclay/main.py
 - `Delete` or `Backspace`: Delete selected Source Notes
 - `Up` / `Down`: Move selected Source Notes by semitone
 - `Left` / `Right`: Nudge selected Source Notes in time
+- `Ctrl + Wheel`: Zoom the time axis
+- `Wheel`: Scroll the timeline horizontally
 
 Reference Notes are locked and are not moved, deleted, split, or merged by
 these editing commands.
+
+## Editing Controls
+
+- Click a Source Note to select it.
+- Shift-click Source Notes for multi-select.
+- Drag the middle of a Source Note to move timing and pitch.
+- Drag the left or right edge of a Source Note to resize timing.
+- Click empty piano-roll space to clear Source Note selection and move the
+  playhead.
+- `Edit Scope: Selected Notes` edits only selected Source Notes.
+- `Edit Scope: All Source Notes` moves all Source Notes together for drag and
+  arrow-key timing/pitch changes. Edge resize still affects only the dragged
+  Source Note.
+- After Source Note edits, the preview is marked `Preview needs render`.
 
 ## Rendering Notes
 

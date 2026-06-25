@@ -10,6 +10,7 @@ from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -107,6 +108,9 @@ class MainWindow(QMainWindow):
         self.play_from_selection_button = self._make_button("Play from Selection", QStyle.SP_MediaPlay)
         self.stop_button = self._make_button("Stop", QStyle.SP_MediaStop)
         self.export_button = self._make_button("Export WAV", QStyle.SP_DialogSaveButton)
+        self.edit_scope_combo = QComboBox()
+        self.edit_scope_combo.addItems(["Selected Notes", "All Source Notes"])
+        self.edit_scope_combo.setCurrentText("Selected Notes")
         self.file_label = QLabel("Load a reference and source WAV")
         self.file_label.setObjectName("MutedLabel")
         self.file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -120,11 +124,14 @@ class MainWindow(QMainWindow):
         self.play_from_selection_button.clicked.connect(self.play_from_selection)
         self.stop_button.clicked.connect(self.stop_playback)
         self.export_button.clicked.connect(self.export_wav)
+        self.edit_scope_combo.currentTextChanged.connect(self._edit_scope_changed)
 
         self.piano_roll.note_selected.connect(self._source_note_selected)
         self.piano_roll.note_edited.connect(self._source_note_edited)
         self.piano_roll.range_selected.connect(self._range_selected)
         self.piano_roll.playhead_changed.connect(self._playhead_changed)
+        self.piano_roll.clear_selection_requested.connect(self.clear_source_selection)
+        self.piano_roll.zoom_changed.connect(self._timeline_zoom_changed)
         self.piano_roll.delete_selected_requested.connect(self.delete_selected_source_notes)
         self.piano_roll.keyboard_edit_requested.connect(self.keyboard_edit_selected)
         self.piano_roll.split_requested.connect(self.split_selected_note)
@@ -179,6 +186,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.play_from_selection_button)
         layout.addWidget(self.stop_button)
         layout.addWidget(self.export_button)
+        layout.addSpacing(8)
+        mode_label = QLabel("Edit Scope")
+        mode_label.setObjectName("MutedLabel")
+        layout.addWidget(mode_label)
+        layout.addWidget(self.edit_scope_combo)
         layout.addSpacing(10)
         layout.addWidget(self.file_label, stretch=1)
         return bar
@@ -313,24 +325,71 @@ class MainWindow(QMainWindow):
         self.inspector_panel.set_selected_notes(self._selected_source_notes())
         self._update_buttons()
 
-    @Slot(int, float, float, float)
-    def _source_note_edited(self, index: int, start: float, end: float, midi_note: float) -> None:
+    @Slot()
+    def clear_source_selection(self) -> None:
+        if not self.selected_source_indices:
+            return
+        self.selected_source_indices = set()
+        self.piano_roll.set_selected_source_indices(set())
+        self.inspector_panel.set_selected_notes([])
+        self._update_buttons()
+        self._set_state("Ready", "selection cleared")
+
+    @Slot(int, float, float, float, str, float, int)
+    def _source_note_edited(
+        self,
+        index: int,
+        start: float,
+        end: float,
+        midi_note: float,
+        mode: str,
+        delta_time: float,
+        delta_midi: int,
+    ) -> None:
         if not 0 <= index < len(self.project.source_notes):
             return
         notes = list(self.project.source_notes)
+        selected: list[VocalNote] = []
+
+        if mode == "move":
+            targets = self._edit_target_indices(index)
+            delta_time = self._clamped_time_delta(notes, targets, delta_time)
+            for target in targets:
+                if not 0 <= target < len(notes):
+                    continue
+                note = notes[target]
+                edited = (
+                    note.with_range(note.start + delta_time, note.end + delta_time)
+                    .with_pitch(note.midi_note + delta_midi)
+                    .with_split_reason("edited_by_user")
+                )
+                notes[target] = edited
+                selected.append(edited)
+            self._commit_source_notes(notes, selected)
+            if delta_midi and abs(delta_time) > 0.0001:
+                self._set_state("Ready", f"Moved {len(selected)} note(s) by {delta_time:+.2f}s and {delta_midi:+d} semitone(s)")
+            elif delta_midi:
+                self._set_state("Ready", f"Shifted {len(selected)} note(s) by {delta_midi:+d} semitone(s)")
+            else:
+                self._set_state("Ready", f"Moved {len(selected)} note(s) by {delta_time:+.2f}s")
+            return
+
         edited = notes[index].with_range(start, end).with_pitch(midi_note).with_split_reason("edited_by_user")
         notes[index] = edited
         self._commit_source_notes(notes, [edited])
-        self._set_state("Ready", f"edited {edited.note_name}")
+        self._set_state("Ready", f"resized {edited.note_name}")
 
     @Slot(float, int)
     def keyboard_edit_selected(self, time_delta: float, midi_delta: int) -> None:
-        if not self.selected_source_indices:
+        targets = self._edit_target_indices(None)
+        if not targets:
+            self._set_state("Ready", "No source note selected")
             return
         notes = list(self.project.source_notes)
         selected: list[VocalNote] = []
-        duration = max(self.project.duration, 0.0)
-        for index in sorted(self.selected_source_indices):
+        if abs(time_delta) > 0.0:
+            time_delta = self._clamped_time_delta(notes, targets, time_delta)
+        for index in sorted(targets):
             if not 0 <= index < len(notes):
                 continue
             note = notes[index]
@@ -340,12 +399,6 @@ class MainWindow(QMainWindow):
             if abs(time_delta) > 0.0:
                 start = note.start + time_delta
                 end = note.end + time_delta
-                if start < 0.0:
-                    end -= start
-                    start = 0.0
-                if end > duration:
-                    start -= end - duration
-                    end = duration
                 start = max(0.0, start)
                 if end - start >= 0.05:
                     edited = edited.with_range(start, end)
@@ -353,7 +406,13 @@ class MainWindow(QMainWindow):
             notes[index] = edited
             selected.append(edited)
         self._commit_source_notes(notes, selected)
-        self._set_state("Ready", "edited selected Source Notes")
+        scope = self.edit_scope_combo.currentText()
+        if midi_delta:
+            self._set_state("Ready", f"Shifted {scope.lower()} by {midi_delta:+d} semitone(s)")
+        elif abs(time_delta) > 0.0:
+            self._set_state("Ready", f"Moved {scope.lower()} by {time_delta:+.2f}s")
+        else:
+            self._set_state("Ready", "No movement applied")
 
     @Slot()
     def delete_selected_source_notes(self) -> None:
@@ -580,6 +639,16 @@ class MainWindow(QMainWindow):
     def _playhead_changed(self, seconds: float) -> None:
         self._set_state("Ready", f"playhead {seconds:.2f} s")
 
+    @Slot(float)
+    def _timeline_zoom_changed(self, zoom: float) -> None:
+        self._set_state("Ready", f"Timeline zoom: {zoom * 100:.0f}%")
+
+    @Slot(str)
+    def _edit_scope_changed(self, edit_scope: str) -> None:
+        self.piano_roll.set_edit_scope(edit_scope)
+        self.inspector_panel.set_edit_scope(edit_scope)
+        self._set_state("Ready", f"Edit Scope: {edit_scope}")
+
     @Slot(float, float)
     def _selection_changed(self, start: float, end: float) -> None:
         if end > start:
@@ -608,8 +677,11 @@ class MainWindow(QMainWindow):
             self.project.bump_edit_count()
             self.project.clear_preview("Preview needs render")
         self._refresh_all()
+        if bump_edit:
+            self._set_state("Ready", "Preview needs render")
 
     def _refresh_all(self) -> None:
+        self.piano_roll.set_edit_scope(self.edit_scope_combo.currentText())
         self.piano_roll.set_documents(self.project.reference_audio, self.project.source_audio)
         self.piano_roll.set_tracks(
             self.project.reference_notes,
@@ -617,6 +689,7 @@ class MainWindow(QMainWindow):
             self.selected_source_indices,
         )
         self.inspector_panel.set_project(self.project)
+        self.inspector_panel.set_edit_scope(self.edit_scope_combo.currentText())
         self.inspector_panel.set_selected_notes(self._selected_source_notes())
         self._update_file_label()
         self._update_buttons()
@@ -634,6 +707,7 @@ class MainWindow(QMainWindow):
             self.export_button,
         ):
             button.setEnabled(enabled)
+        self.edit_scope_combo.setEnabled(enabled)
 
     def _update_buttons(self) -> None:
         if self.analysis_thread is not None:
@@ -651,6 +725,7 @@ class MainWindow(QMainWindow):
         )
         self.stop_button.setEnabled(True)
         self.export_button.setEnabled(self.project.has_preview)
+        self.edit_scope_combo.setEnabled(True)
 
     def _update_file_label(self) -> None:
         reference = self.project.reference_audio.file_name if self.project.reference_audio else "No reference"
@@ -663,6 +738,26 @@ class MainWindow(QMainWindow):
             for index in sorted(self.selected_source_indices)
             if 0 <= index < len(self.project.source_notes)
         ]
+
+    def _edit_target_indices(self, anchor_index: int | None) -> set[int]:
+        if self.edit_scope_combo.currentText() == "All Source Notes":
+            return set(range(len(self.project.source_notes)))
+        if anchor_index is not None and anchor_index in self.selected_source_indices:
+            return set(self.selected_source_indices)
+        if anchor_index is not None and 0 <= anchor_index < len(self.project.source_notes):
+            return {anchor_index}
+        return set(self.selected_source_indices)
+
+    def _clamped_time_delta(
+        self,
+        notes: list[VocalNote],
+        target_indices: set[int],
+        delta_time: float,
+    ) -> float:
+        if not target_indices:
+            return 0.0
+        earliest = min(notes[index].start for index in target_indices if 0 <= index < len(notes))
+        return max(delta_time, -earliest)
 
     def _play_start_time(self) -> float:
         selected = self._selected_source_notes()

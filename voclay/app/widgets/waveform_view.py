@@ -70,10 +70,34 @@ class PianoRollGraphicsView(QGraphicsView):
             else:
                 self.editor.set_selection_range(current, current)
                 self.editor.set_playhead_time(current, emit=True)
+                self.editor.clear_selection_requested.emit()
             self._range_dragged = False
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: ANN001, N802
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.accept()
+            return
+
+        if event.modifiers() & Qt.ControlModifier:
+            cursor_x = self.mapToScene(event.position().toPoint()).x()
+            cursor_time = self.editor.x_to_time(cursor_x)
+            factor = 1.12 if delta > 0 else 1.0 / 1.12
+            zoom = self.editor.set_time_zoom(self.editor.pixels_per_second * factor)
+            new_x = self.editor.time_to_x(cursor_time)
+            self.horizontalScrollBar().setValue(int(new_x - event.position().x()))
+            self.editor.zoom_changed.emit(zoom)
+            event.accept()
+            return
+
+        step = 86
+        notches = delta / 120.0
+        bar = self.horizontalScrollBar()
+        bar.setValue(int(bar.value() - notches * step))
+        event.accept()
 
     def keyPressEvent(self, event) -> None:  # noqa: ANN001, N802
         if self.editor.handle_key_press(event.key()):
@@ -108,6 +132,7 @@ class NoteBlockItem(QGraphicsRectItem):
         self.mode = "move"
         self.drag_start_scene = QPointF()
         self.drag_start_note = note
+        self.drag_start_notes: list[VocalNote] = []
         self.is_source = note.track_type == "source" and not note.locked
         self.setAcceptedMouseButtons(Qt.LeftButton if self.is_source else Qt.NoButton)
         self.setAcceptHoverEvents(self.is_source)
@@ -128,7 +153,8 @@ class NoteBlockItem(QGraphicsRectItem):
             return
 
         additive = bool(event.modifiers() & Qt.ShiftModifier)
-        self.editor.note_selected.emit(self.index, additive)
+        if additive or not self.editor.is_source_index_selected(self.index):
+            self.editor.note_selected.emit(self.index, additive)
         self.editor.view.setFocus(Qt.MouseFocusReason)
         local_x = self._note_local_x(event)
         width = self.rect().width()
@@ -144,6 +170,7 @@ class NoteBlockItem(QGraphicsRectItem):
 
         self.drag_start_scene = event.scenePos()
         self.drag_start_note = self.note
+        self.drag_start_notes = list(self.editor.source_notes())
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: ANN001, N802
@@ -167,13 +194,32 @@ class NoteBlockItem(QGraphicsRectItem):
 
         start, end, midi = self.editor.clamp_source_note_edit(self.index, start, end, midi, self.mode)
         self.note = self.drag_start_note.with_range(start, end).with_pitch(midi)
-        self.set_note(self.note)
+        delta_time = self.note.start - self.drag_start_note.start
+        delta_midi = int(round(self.note.midi_note - self.drag_start_note.midi_note))
+        self.editor.preview_source_note_drag(
+            self.index,
+            self.drag_start_notes,
+            delta_time,
+            delta_midi,
+            self.mode,
+            self.note,
+        )
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001, N802
         if not self.is_source:
             return
-        self.editor.note_edited.emit(self.index, self.note.start, self.note.end, self.note.midi_note)
+        delta_time = self.note.start - self.drag_start_note.start
+        delta_midi = int(round(self.note.midi_note - self.drag_start_note.midi_note))
+        self.editor.note_edited.emit(
+            self.index,
+            self.note.start,
+            self.note.end,
+            self.note.midi_note,
+            self.mode,
+            delta_time,
+            delta_midi,
+        )
         self.unsetCursor()
         event.accept()
 
@@ -269,7 +315,9 @@ class WaveformView(QWidget):
     range_selected = Signal(float, float, bool)
     playhead_changed = Signal(float)
     note_selected = Signal(int, bool)
-    note_edited = Signal(int, float, float, float)
+    note_edited = Signal(int, float, float, float, str, float, int)
+    clear_selection_requested = Signal()
+    zoom_changed = Signal(float)
     delete_selected_requested = Signal()
     keyboard_edit_requested = Signal(float, int)
     split_requested = Signal()
@@ -280,8 +328,11 @@ class WaveformView(QWidget):
         super().__init__(parent)
         self.keyboard_width = 76.0
         self.pixels_per_second = 120.0
+        self.min_pixels_per_second = 45.0
+        self.max_pixels_per_second = 520.0
         self.note_height = 22.0
         self.min_note_duration = 0.05
+        self.edit_scope = "Selected Notes"
 
         self._duration = 0.0
         self._midi_low = 60
@@ -359,6 +410,15 @@ class WaveformView(QWidget):
         self._update_overlay_geometry()
         self.scene.update()
 
+    def source_notes(self) -> list[VocalNote]:
+        return list(self._source_notes)
+
+    def is_source_index_selected(self, index: int) -> bool:
+        return index in self._selected_source_indices
+
+    def set_edit_scope(self, edit_scope: str) -> None:
+        self.edit_scope = edit_scope
+
     def set_selected_source_indices(self, indices: set[int]) -> None:
         self._selected_source_indices = set(indices)
         for index, item in enumerate(self._source_items):
@@ -420,6 +480,19 @@ class WaveformView(QWidget):
             return True
         return False
 
+    def set_time_zoom(self, pixels_per_second: float) -> float:
+        previous_playhead = self._playhead_time
+        self.pixels_per_second = max(
+            self.min_pixels_per_second,
+            min(float(pixels_per_second), self.max_pixels_per_second),
+        )
+        self._update_scene_rect()
+        self._draw_note_segments()
+        self._update_overlay_geometry()
+        self.set_playhead_time(previous_playhead)
+        self.scene.update()
+        return self.pixels_per_second / 120.0
+
     @property
     def scene_width(self) -> float:
         return self.keyboard_width + max(8.0, self._duration * self.pixels_per_second) + 48.0
@@ -479,11 +552,57 @@ class WaveformView(QWidget):
             start = max(lower_bound, min(start, upper_bound - self.min_note_duration))
             end = min(upper_bound, max(end, start + self.min_note_duration))
         else:
-            duration = min(max(self.min_note_duration, self._source_notes[index].duration), available)
-            start = max(lower_bound, min(start, upper_bound - duration))
+            targets = self.drag_target_indices(index)
+            delta_time = start - self._source_notes[index].start
+            if targets:
+                earliest = min(self._source_notes[target].start for target in targets)
+                delta_time = max(delta_time, -earliest)
+            duration = max(self.min_note_duration, self._source_notes[index].duration)
+            start = self._source_notes[index].start + delta_time
             end = start + duration
 
         return round(start, 2), round(end, 2), midi_note
+
+    def drag_target_indices(self, anchor_index: int) -> set[int]:
+        if self.edit_scope == "All Source Notes":
+            return set(range(len(self._source_notes)))
+        if anchor_index in self._selected_source_indices:
+            return set(self._selected_source_indices)
+        return {anchor_index}
+
+    def preview_source_note_drag(
+        self,
+        anchor_index: int,
+        start_notes: list[VocalNote],
+        delta_time: float,
+        delta_midi: int,
+        mode: str,
+        edited_anchor: VocalNote,
+    ) -> None:
+        if not start_notes or len(start_notes) != len(self._source_items):
+            return
+
+        if mode != "move":
+            for index, item in enumerate(self._source_items):
+                item.set_note(edited_anchor if index == anchor_index else start_notes[index])
+            self.scene.update()
+            return
+
+        targets = self.drag_target_indices(anchor_index)
+        if targets:
+            earliest = min(start_notes[index].start for index in targets)
+            delta_time = max(delta_time, -earliest)
+
+        for index, item in enumerate(self._source_items):
+            note = start_notes[index]
+            if index in targets:
+                note = (
+                    note.with_range(note.start + delta_time, note.end + delta_time)
+                    .with_pitch(note.midi_note + delta_midi)
+                )
+            item.set_note(note)
+            item.set_selected(index in self._selected_source_indices or index in targets)
+        self.scene.update()
 
     def draw_piano_roll_background(self, painter: QPainter, rect: QRectF) -> None:
         painter.fillRect(rect, QColor(COLORS["panel"]))

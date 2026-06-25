@@ -48,6 +48,24 @@ class InspectorPanel(QFrame):
         self.selected_original_midi = QLabel("-")
         self.selected_pitch_shift = QLabel("-")
         self.selected_split_reason = QLabel("-")
+        self.edit_scope = QLabel("Selected Notes")
+        self.controls_text = QLabel()
+        self.controls_text.setWordWrap(True)
+        self.controls_text.setText(
+            "Edit Scope: Selected Notes\n"
+            "- Click Source note: Select\n"
+            "- Shift + Click: Multi-select\n"
+            "- Drag Source note: Move pitch / timing\n"
+            "- Drag left/right edge: Resize timing\n"
+            "- Ctrl + Wheel: Zoom time axis\n"
+            "- Wheel: Scroll timeline\n"
+            "- Space: Play from selection / Stop\n"
+            "- S: Split selected note at playhead\n"
+            "- M: Merge selected notes\n"
+            "- Delete: Delete selected source notes\n"
+            "- Up/Down: Move pitch by semitone\n"
+            "- Left/Right: Move timing slightly"
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -57,6 +75,7 @@ class InspectorPanel(QFrame):
         layout.addWidget(self._section("Reference", self._reference_form()))
         layout.addWidget(self._section("Source", self._source_form()))
         layout.addWidget(self._section("Selected", self._selected_form()))
+        layout.addWidget(self._section("Controls", self.controls_text))
         layout.addStretch(1)
 
     def clear(self) -> None:
@@ -75,6 +94,24 @@ class InspectorPanel(QFrame):
         self.source_frames.setText(self._frame_count(project.source_audio))
         self.source_notes.setText(str(len(project.source_notes)) if project.source_notes else "-")
         self.source_edits.setText(str(project.edit_count))
+
+    def set_edit_scope(self, edit_scope: str) -> None:
+        self.edit_scope.setText(edit_scope)
+        self.controls_text.setText(
+            f"Edit Scope: {edit_scope}\n"
+            "- Click Source note: Select\n"
+            "- Shift + Click: Multi-select\n"
+            "- Drag Source note: Move pitch / timing\n"
+            "- Drag left/right edge: Resize timing\n"
+            "- Ctrl + Wheel: Zoom time axis\n"
+            "- Wheel: Scroll timeline\n"
+            "- Space: Play from selection / Stop\n"
+            "- S: Split selected note at playhead\n"
+            "- M: Merge selected notes\n"
+            "- Delete: Delete selected source notes\n"
+            "- Up/Down: Move pitch by semitone\n"
+            "- Left/Right: Move timing slightly"
+        )
 
     def set_selected_notes(self, notes: list[VocalNote]) -> None:
         if not notes:
