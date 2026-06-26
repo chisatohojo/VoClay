@@ -5,7 +5,7 @@ from pathlib import Path
 from statistics import median
 
 import soundfile as sf
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -29,10 +29,23 @@ from voclay.app.audio_renderer import AudioRenderer, RenderResult
 from voclay.app.models import PitchFrame, VocalNote
 from voclay.app.note_segmenter import NoteSegmenter
 from voclay.app.pitch_analyzer import PitchAnalyzer
-from voclay.app.project_document import ProjectDocument
+from voclay.app.project_document import (
+    EDIT_SCOPE_ALL_SOURCE,
+    EDIT_SCOPE_RANGE,
+    EDIT_SCOPE_SELECTED,
+    ProjectDocument,
+)
 from voclay.app.theme import asset_path
 from voclay.app.widgets.inspector_panel import InspectorPanel
 from voclay.app.widgets.waveform_view import WaveformView
+
+
+EDIT_SCOPE_LABELS = {
+    EDIT_SCOPE_SELECTED: "Selected Notes",
+    EDIT_SCOPE_RANGE: "Range Selection",
+    EDIT_SCOPE_ALL_SOURCE: "All Source Notes",
+}
+EDIT_SCOPE_VALUES = {label: value for value, label in EDIT_SCOPE_LABELS.items()}
 
 
 @dataclass
@@ -87,6 +100,8 @@ class MainWindow(QMainWindow):
         if icon_file.exists():
             self.setWindowIcon(QIcon(str(icon_file)))
 
+        self.settings = QSettings("VoClay", "VoClay")
+        self.last_used_folder = self._read_last_used_folder()
         self.project = ProjectDocument()
         self.audio_player = AudioPlayer()
         self.playhead_timer = QTimer(self)
@@ -103,14 +118,17 @@ class MainWindow(QMainWindow):
         self.analyze_reference_button = self._make_button("Analyze Reference", QStyle.SP_FileDialogDetailedView)
         self.load_source_button = self._make_button("Load Source WAV", QStyle.SP_DialogOpenButton)
         self.analyze_source_button = self._make_button("Analyze Source", QStyle.SP_FileDialogDetailedView)
+        self.load_project_button = self._make_button("Load Project", QStyle.SP_DialogOpenButton)
+        self.save_project_button = self._make_button("Save Project", QStyle.SP_DialogSaveButton)
         self.match_selected_button = self._make_button("Match Selected", QStyle.SP_DialogApplyButton)
         self.render_preview_button = self._make_button("Render Preview", QStyle.SP_MediaPlay)
         self.play_from_selection_button = self._make_button("Play from Selection", QStyle.SP_MediaPlay)
         self.stop_button = self._make_button("Stop", QStyle.SP_MediaStop)
         self.export_button = self._make_button("Export WAV", QStyle.SP_DialogSaveButton)
         self.edit_scope_combo = QComboBox()
-        self.edit_scope_combo.addItems(["Selected Notes", "All Source Notes"])
-        self.edit_scope_combo.setCurrentText("Selected Notes")
+        for value, label in EDIT_SCOPE_LABELS.items():
+            self.edit_scope_combo.addItem(label, value)
+        self.edit_scope_combo.setCurrentText(EDIT_SCOPE_LABELS[EDIT_SCOPE_SELECTED])
         self.file_label = QLabel("Load a reference and source WAV")
         self.file_label.setObjectName("MutedLabel")
         self.file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -119,6 +137,8 @@ class MainWindow(QMainWindow):
         self.analyze_reference_button.clicked.connect(lambda: self.analyze_track("reference"))
         self.load_source_button.clicked.connect(lambda: self.load_audio("source"))
         self.analyze_source_button.clicked.connect(lambda: self.analyze_track("source"))
+        self.load_project_button.clicked.connect(self.load_project)
+        self.save_project_button.clicked.connect(self.save_project)
         self.match_selected_button.clicked.connect(self.match_selected)
         self.render_preview_button.clicked.connect(self.render_preview)
         self.play_from_selection_button.clicked.connect(self.play_from_selection)
@@ -129,6 +149,7 @@ class MainWindow(QMainWindow):
         self.piano_roll.note_selected.connect(self._source_note_selected)
         self.piano_roll.note_edited.connect(self._source_note_edited)
         self.piano_roll.range_selected.connect(self._range_selected)
+        self.piano_roll.range_cleared.connect(self._range_cleared)
         self.piano_roll.playhead_changed.connect(self._playhead_changed)
         self.piano_roll.clear_selection_requested.connect(self.clear_source_selection)
         self.piano_roll.zoom_changed.connect(self._timeline_zoom_changed)
@@ -177,6 +198,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(logo_label)
         layout.addWidget(title)
         layout.addSpacing(10)
+        layout.addWidget(self.load_project_button)
+        layout.addWidget(self.save_project_button)
+        layout.addSpacing(6)
         layout.addWidget(self.load_reference_button)
         layout.addWidget(self.analyze_reference_button)
         layout.addWidget(self.load_source_button)
@@ -208,11 +232,12 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Load Reference WAV" if track_type == "reference" else "Load Source WAV",
-            str(Path.home()),
+            self._dialog_path(),
             "WAV files (*.wav)",
         )
         if not file_path:
             return
+        self._remember_folder(file_path)
 
         try:
             document = AudioDocument.load(file_path)
@@ -231,9 +256,64 @@ class MainWindow(QMainWindow):
             self.project.source_notes = []
             self.selected_source_indices = set()
             self.project.edit_count = 0
+            self.project.clear_selection_range()
         self.project.clear_preview("Preview needs render")
         self._refresh_all()
         self._set_state("Ready", f"loaded {track_type} {document.file_name}")
+
+    @Slot()
+    def save_project(self) -> None:
+        if not self._has_project_content():
+            self._set_state("Ready", "Nothing to save yet")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save VoClay Project",
+            self._dialog_path("voclay_project.voclay"),
+            "VoClay projects (*.voclay);;JSON files (*.json);;All files (*)",
+        )
+        if not file_path:
+            return
+        path = Path(file_path)
+        if not path.suffix:
+            path = path.with_suffix(".voclay")
+
+        try:
+            self.project.save(path)
+        except Exception as exc:  # noqa: BLE001
+            self._show_error(f"Could not save project:\n{exc}")
+            return
+
+        self._remember_folder(path)
+        self._refresh_all()
+        self._set_state("Ready", f"saved project {path.name}")
+
+    @Slot()
+    def load_project(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load VoClay Project",
+            self._dialog_path(),
+            "VoClay projects (*.voclay);;JSON files (*.json);;All files (*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            project = ProjectDocument.load(file_path)
+        except Exception as exc:  # noqa: BLE001
+            self._show_error(f"Could not load project:\n{exc}")
+            return
+
+        self.stop_playback(update_state=False)
+        self.project = project
+        self._set_edit_scope_combo(project.edit_scope)
+        self.selected_source_indices = set()
+        self.piano_roll.set_selected_source_indices(set())
+        self._remember_folder(file_path)
+        self._refresh_all()
+        self._set_state("Ready", f"loaded project {Path(file_path).name}")
 
     @Slot()
     def analyze_track(self, track_type: str) -> None:
@@ -276,6 +356,7 @@ class MainWindow(QMainWindow):
             self.project.source_notes = result.notes
             self.selected_source_indices = set()
             self.project.edit_count = 0
+            self.project.clear_selection_range()
             self.project.clear_preview("Preview needs render")
         self._refresh_all()
         self._set_state("Ready", result.status_message)
@@ -304,26 +385,32 @@ class MainWindow(QMainWindow):
         else:
             self.selected_source_indices = {index}
 
-        note = self.project.source_notes[index]
         self.piano_roll.set_selected_source_indices(self.selected_source_indices)
-        self.piano_roll.set_selection_range(note.start, note.end, emit=False)
         self.inspector_panel.set_selected_notes(self._selected_source_notes())
+        self._update_selection_info()
         self._update_buttons()
 
     @Slot(float, float, bool)
     def _range_selected(self, start: float, end: float, additive: bool) -> None:
-        matches = {
-            index
-            for index, note in enumerate(self.project.source_notes)
-            if note.start < end and note.end > start
-        }
-        if additive:
-            self.selected_source_indices |= matches
-        else:
-            self.selected_source_indices = matches
-        self.piano_roll.set_selected_source_indices(self.selected_source_indices)
-        self.inspector_panel.set_selected_notes(self._selected_source_notes())
+        self.project.set_selection_range(start, end)
+        self.piano_roll.set_selection_range(start, end, emit=False)
+        self._update_selection_info()
         self._update_buttons()
+        count = len(self._range_source_note_indices())
+        detail = f"Range selected: {start:.2f}s - {end:.2f}s"
+        if count:
+            detail = f"{detail} ({count} source note(s))"
+        else:
+            detail = f"{detail}; No source notes in range"
+        self._set_state("Ready", detail)
+
+    @Slot()
+    def _range_cleared(self) -> None:
+        had_range = self.project.selection_range is not None
+        self.project.clear_selection_range()
+        self._update_selection_info()
+        if had_range:
+            self._set_state("Ready", "Range cleared")
 
     @Slot()
     def clear_source_selection(self) -> None:
@@ -332,6 +419,7 @@ class MainWindow(QMainWindow):
         self.selected_source_indices = set()
         self.piano_roll.set_selected_source_indices(set())
         self.inspector_panel.set_selected_notes([])
+        self._update_selection_info()
         self._update_buttons()
         self._set_state("Ready", "selection cleared")
 
@@ -353,7 +441,17 @@ class MainWindow(QMainWindow):
 
         if mode == "move":
             targets = self._edit_target_indices(index)
+            if not targets:
+                self._refresh_all()
+                self._set_state("Ready", self._empty_edit_target_message(index))
+                return
             delta_time = self._clamped_time_delta(notes, targets, delta_time)
+            if self.project.edit_scope == EDIT_SCOPE_RANGE and abs(delta_time) > 0.0001:
+                self.project.move_selection_range(delta_time)
+            if abs(delta_time) <= 0.0001 and delta_midi == 0:
+                self._refresh_all()
+                self._set_state("Ready", "No movement applied")
+                return
             for target in targets:
                 if not 0 <= target < len(notes):
                     continue
@@ -365,13 +463,8 @@ class MainWindow(QMainWindow):
                 )
                 notes[target] = edited
                 selected.append(edited)
-            self._commit_source_notes(notes, selected)
-            if delta_midi and abs(delta_time) > 0.0001:
-                self._set_state("Ready", f"Moved {len(selected)} note(s) by {delta_time:+.2f}s and {delta_midi:+d} semitone(s)")
-            elif delta_midi:
-                self._set_state("Ready", f"Shifted {len(selected)} note(s) by {delta_midi:+d} semitone(s)")
-            else:
-                self._set_state("Ready", f"Moved {len(selected)} note(s) by {delta_time:+.2f}s")
+            self._commit_source_notes(notes, selected, preserve_selection=True)
+            self._set_state("Ready", self._edit_result_message(len(selected), delta_time, delta_midi))
             return
 
         edited = notes[index].with_range(start, end).with_pitch(midi_note).with_split_reason("edited_by_user")
@@ -383,12 +476,17 @@ class MainWindow(QMainWindow):
     def keyboard_edit_selected(self, time_delta: float, midi_delta: int) -> None:
         targets = self._edit_target_indices(None)
         if not targets:
-            self._set_state("Ready", "No source note selected")
+            self._set_state("Ready", self._empty_edit_target_message(None))
             return
         notes = list(self.project.source_notes)
         selected: list[VocalNote] = []
         if abs(time_delta) > 0.0:
             time_delta = self._clamped_time_delta(notes, targets, time_delta)
+        if self.project.edit_scope == EDIT_SCOPE_RANGE and abs(time_delta) > 0.0001:
+            self.project.move_selection_range(time_delta)
+        if abs(time_delta) <= 0.0001 and midi_delta == 0:
+            self._set_state("Ready", "No movement applied")
+            return
         for index in sorted(targets):
             if not 0 <= index < len(notes):
                 continue
@@ -405,14 +503,8 @@ class MainWindow(QMainWindow):
             edited = edited.with_split_reason("edited_by_user")
             notes[index] = edited
             selected.append(edited)
-        self._commit_source_notes(notes, selected)
-        scope = self.edit_scope_combo.currentText()
-        if midi_delta:
-            self._set_state("Ready", f"Shifted {scope.lower()} by {midi_delta:+d} semitone(s)")
-        elif abs(time_delta) > 0.0:
-            self._set_state("Ready", f"Moved {scope.lower()} by {time_delta:+.2f}s")
-        else:
-            self._set_state("Ready", "No movement applied")
+        self._commit_source_notes(notes, selected, preserve_selection=True)
+        self._set_state("Ready", self._edit_result_message(len(selected), time_delta, midi_delta))
 
     @Slot()
     def delete_selected_source_notes(self) -> None:
@@ -616,11 +708,12 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Export WAV",
-            str(Path.home() / "voclay_preview.wav"),
+            self._dialog_path("voclay_preview.wav"),
             "WAV files (*.wav)",
         )
         if not file_path:
             return
+        self._remember_folder(file_path)
         try:
             sf.write(file_path, self.project.rendered_preview.samples, self.project.rendered_preview.sample_rate)
         except Exception as exc:  # noqa: BLE001
@@ -644,29 +737,45 @@ class MainWindow(QMainWindow):
         self._set_state("Ready", f"Timeline zoom: {zoom * 100:.0f}%")
 
     @Slot(str)
-    def _edit_scope_changed(self, edit_scope: str) -> None:
+    def _edit_scope_changed(self, edit_scope_label: str) -> None:
+        edit_scope = EDIT_SCOPE_VALUES.get(edit_scope_label, EDIT_SCOPE_SELECTED)
+        self.project.edit_scope = edit_scope
         self.piano_roll.set_edit_scope(edit_scope)
-        self.inspector_panel.set_edit_scope(edit_scope)
-        self._set_state("Ready", f"Edit Scope: {edit_scope}")
+        self.inspector_panel.set_edit_scope(self._scope_label(edit_scope))
+        self._update_selection_info()
+        self._set_state("Ready", f"Edit Scope: {self._scope_label(edit_scope)}")
 
     @Slot(float, float)
     def _selection_changed(self, start: float, end: float) -> None:
         if end > start:
-            self._set_state("Ready", f"selection {start:.2f}-{end:.2f} s")
+            self.project.set_selection_range(start, end)
+        else:
+            self.project.clear_selection_range()
+        self._update_selection_info()
 
     def _commit_source_notes(
         self,
         notes: list[VocalNote],
         selected_notes: list[VocalNote],
         bump_edit: bool = True,
+        preserve_selection: bool = False,
     ) -> None:
+        preserved_ids: set[int] = set()
+        if preserve_selection:
+            preserved_ids = {
+                self.project.source_notes[index].id
+                for index in self.selected_source_indices
+                if 0 <= index < len(self.project.source_notes)
+            }
         sorted_notes = sorted(notes, key=lambda note: (note.start, note.end, note.midi_note))
         selected_indices: set[int] = set()
         renumbered: list[VocalNote] = []
         for index, note in enumerate(sorted_notes):
             updated = note.with_id(index).with_track("source", locked=False)
             renumbered.append(updated)
-            if any(note == selected for selected in selected_notes):
+            if preserve_selection and note.id in preserved_ids:
+                selected_indices.add(index)
+            elif any(note == selected for selected in selected_notes):
                 selected_indices.add(index)
 
         self.project.source_notes = renumbered
@@ -681,21 +790,29 @@ class MainWindow(QMainWindow):
             self._set_state("Ready", "Preview needs render")
 
     def _refresh_all(self) -> None:
-        self.piano_roll.set_edit_scope(self.edit_scope_combo.currentText())
+        self.piano_roll.set_edit_scope(self.project.edit_scope)
         self.piano_roll.set_documents(self.project.reference_audio, self.project.source_audio)
         self.piano_roll.set_tracks(
             self.project.reference_notes,
             self.project.source_notes,
             self.selected_source_indices,
         )
+        selection = self.project.selection_range
+        if selection is None:
+            self.piano_roll.clear_selection_range(emit=False)
+        else:
+            self.piano_roll.set_selection_range(selection[0], selection[1], emit=False)
         self.inspector_panel.set_project(self.project)
-        self.inspector_panel.set_edit_scope(self.edit_scope_combo.currentText())
+        self.inspector_panel.set_edit_scope(self._scope_label())
         self.inspector_panel.set_selected_notes(self._selected_source_notes())
+        self._update_selection_info()
         self._update_file_label()
         self._update_buttons()
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for button in (
+            self.load_project_button,
+            self.save_project_button,
             self.load_reference_button,
             self.analyze_reference_button,
             self.load_source_button,
@@ -712,6 +829,8 @@ class MainWindow(QMainWindow):
     def _update_buttons(self) -> None:
         if self.analysis_thread is not None:
             return
+        self.load_project_button.setEnabled(True)
+        self.save_project_button.setEnabled(self._has_project_content())
         self.load_reference_button.setEnabled(True)
         self.load_source_button.setEnabled(True)
         self.analyze_reference_button.setEnabled(self.project.reference_audio is not None)
@@ -732,6 +851,48 @@ class MainWindow(QMainWindow):
         source = self.project.source_audio.file_name if self.project.source_audio else "No source"
         self.file_label.setText(f"Reference: {reference}   Source: {source}")
 
+    def _has_project_content(self) -> bool:
+        return any(
+            (
+                self.project.reference_audio is not None,
+                self.project.source_audio is not None,
+                bool(self.project.reference_notes),
+                bool(self.project.source_notes),
+            )
+        )
+
+    def _read_last_used_folder(self) -> Path:
+        configured = self.settings.value("last_used_folder", str(Path.home()))
+        folder = Path(str(configured)).expanduser()
+        if folder.is_file():
+            folder = folder.parent
+        if not folder.exists():
+            return Path.home()
+        return folder
+
+    def _dialog_path(self, default_name: str | None = None) -> str:
+        folder = self.last_used_folder if self.last_used_folder.exists() else Path.home()
+        if default_name:
+            return str(folder / default_name)
+        return str(folder)
+
+    def _remember_folder(self, file_path: str | Path) -> None:
+        path = Path(file_path).expanduser()
+        folder = path if path.is_dir() else path.parent
+        if not folder.exists():
+            return
+        self.last_used_folder = folder
+        self.settings.setValue("last_used_folder", str(folder))
+
+    def _set_edit_scope_combo(self, edit_scope: str) -> None:
+        label = self._scope_label(edit_scope)
+        if self.edit_scope_combo.currentText() != label:
+            self.edit_scope_combo.setCurrentText(label)
+        self.project.edit_scope = EDIT_SCOPE_VALUES.get(label, EDIT_SCOPE_SELECTED)
+
+    def _scope_label(self, edit_scope: str | None = None) -> str:
+        return EDIT_SCOPE_LABELS.get(edit_scope or self.project.edit_scope, EDIT_SCOPE_LABELS[EDIT_SCOPE_SELECTED])
+
     def _selected_source_notes(self) -> list[VocalNote]:
         return [
             self.project.source_notes[index]
@@ -740,13 +901,75 @@ class MainWindow(QMainWindow):
         ]
 
     def _edit_target_indices(self, anchor_index: int | None) -> set[int]:
-        if self.edit_scope_combo.currentText() == "All Source Notes":
-            return set(range(len(self.project.source_notes)))
+        if self.project.edit_scope == EDIT_SCOPE_ALL_SOURCE:
+            return {
+                index
+                for index, note in enumerate(self.project.source_notes)
+                if note.track_type == "source" and not note.locked
+            }
+        if self.project.edit_scope == EDIT_SCOPE_RANGE:
+            if self.project.selection_range is None:
+                return set()
+            if anchor_index is not None and not self._source_note_overlaps_range(anchor_index):
+                return set()
+            return self._range_source_note_indices()
         if anchor_index is not None and anchor_index in self.selected_source_indices:
             return set(self.selected_source_indices)
         if anchor_index is not None and 0 <= anchor_index < len(self.project.source_notes):
             return {anchor_index}
         return set(self.selected_source_indices)
+
+    def _range_source_note_indices(self) -> set[int]:
+        selection = self.project.selection_range
+        if selection is None:
+            return set()
+        start, end = selection
+        return {
+            index
+            for index, note in enumerate(self.project.source_notes)
+            if note.track_type == "source" and not note.locked and note.end > start and note.start < end
+        }
+
+    def _source_note_overlaps_range(self, index: int) -> bool:
+        selection = self.project.selection_range
+        if selection is None or not 0 <= index < len(self.project.source_notes):
+            return False
+        start, end = selection
+        note = self.project.source_notes[index]
+        return note.track_type == "source" and not note.locked and note.end > start and note.start < end
+
+    def _empty_edit_target_message(self, anchor_index: int | None) -> str:
+        if self.project.edit_scope == EDIT_SCOPE_RANGE:
+            if self.project.selection_range is None:
+                return "No range selected"
+            if anchor_index is not None and not self._source_note_overlaps_range(anchor_index):
+                return "Dragged note is outside current range"
+            return "No source notes in range"
+        if self.project.edit_scope == EDIT_SCOPE_ALL_SOURCE:
+            return "No Source Notes"
+        return "No Source Note selected"
+
+    def _edit_result_message(self, count: int, delta_time: float, delta_midi: int) -> str:
+        target_label = {
+            EDIT_SCOPE_SELECTED: "selected note(s)",
+            EDIT_SCOPE_RANGE: "range notes",
+            EDIT_SCOPE_ALL_SOURCE: "source notes",
+        }.get(self.project.edit_scope, "note(s)")
+        if delta_midi and abs(delta_time) > 0.0001:
+            action = f"Moved {count} {target_label} by {delta_time:+.2f}s and {delta_midi:+d} semitone(s)"
+        elif delta_midi:
+            action = f"Shifted {count} {target_label} by {delta_midi:+d} semitone(s)"
+        else:
+            action = f"Moved {count} {target_label} by {delta_time:+.2f}s"
+        return f"{action}; Preview needs render"
+
+    def _update_selection_info(self) -> None:
+        self.inspector_panel.set_selection_info(
+            edit_scope=self._scope_label(),
+            selected_count=len(self.selected_source_indices),
+            selection_range=self.project.selection_range,
+            range_target_count=len(self._range_source_note_indices()),
+        )
 
     def _clamped_time_delta(
         self,
@@ -757,7 +980,10 @@ class MainWindow(QMainWindow):
         if not target_indices:
             return 0.0
         earliest = min(notes[index].start for index in target_indices if 0 <= index < len(notes))
-        return max(delta_time, -earliest)
+        lower_limit = -earliest
+        if self.project.edit_scope == EDIT_SCOPE_RANGE and self.project.selection_range is not None:
+            lower_limit = max(lower_limit, -self.project.selection_range[0])
+        return max(delta_time, lower_limit)
 
     def _play_start_time(self) -> float:
         selected = self._selected_source_notes()
@@ -786,6 +1012,10 @@ class MainWindow(QMainWindow):
 
     def keyPressEvent(self, event) -> None:  # noqa: ANN001, N802
         key = event.key()
+        if key == Qt.Key_S and event.modifiers() & Qt.ControlModifier:
+            self.save_project()
+            event.accept()
+            return
         if key == Qt.Key_Space:
             self.play_from_selection()
             event.accept()

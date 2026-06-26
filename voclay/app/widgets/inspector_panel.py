@@ -49,23 +49,13 @@ class InspectorPanel(QFrame):
         self.selected_pitch_shift = QLabel("-")
         self.selected_split_reason = QLabel("-")
         self.edit_scope = QLabel("Selected Notes")
+        self.range_start = QLabel("-")
+        self.range_end = QLabel("-")
+        self.range_length = QLabel("-")
+        self.range_target_count = QLabel("0")
         self.controls_text = QLabel()
         self.controls_text.setWordWrap(True)
-        self.controls_text.setText(
-            "Edit Scope: Selected Notes\n"
-            "- Click Source note: Select\n"
-            "- Shift + Click: Multi-select\n"
-            "- Drag Source note: Move pitch / timing\n"
-            "- Drag left/right edge: Resize timing\n"
-            "- Ctrl + Wheel: Zoom time axis\n"
-            "- Wheel: Scroll timeline\n"
-            "- Space: Play from selection / Stop\n"
-            "- S: Split selected note at playhead\n"
-            "- M: Merge selected notes\n"
-            "- Delete: Delete selected source notes\n"
-            "- Up/Down: Move pitch by semitone\n"
-            "- Left/Right: Move timing slightly"
-        )
+        self.controls_text.setText(self._controls_text("Selected Notes"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -74,7 +64,7 @@ class InspectorPanel(QFrame):
         layout.addWidget(self._section("Project", self._project_form()))
         layout.addWidget(self._section("Reference", self._reference_form()))
         layout.addWidget(self._section("Source", self._source_form()))
-        layout.addWidget(self._section("Selected", self._selected_form()))
+        layout.addWidget(self._section("Selection", self._selected_form()))
         layout.addWidget(self._section("Controls", self.controls_text))
         layout.addStretch(1)
 
@@ -97,25 +87,31 @@ class InspectorPanel(QFrame):
 
     def set_edit_scope(self, edit_scope: str) -> None:
         self.edit_scope.setText(edit_scope)
-        self.controls_text.setText(
-            f"Edit Scope: {edit_scope}\n"
-            "- Click Source note: Select\n"
-            "- Shift + Click: Multi-select\n"
-            "- Drag Source note: Move pitch / timing\n"
-            "- Drag left/right edge: Resize timing\n"
-            "- Ctrl + Wheel: Zoom time axis\n"
-            "- Wheel: Scroll timeline\n"
-            "- Space: Play from selection / Stop\n"
-            "- S: Split selected note at playhead\n"
-            "- M: Merge selected notes\n"
-            "- Delete: Delete selected source notes\n"
-            "- Up/Down: Move pitch by semitone\n"
-            "- Left/Right: Move timing slightly"
-        )
+        self.controls_text.setText(self._controls_text(edit_scope))
+
+    def set_selection_info(
+        self,
+        edit_scope: str,
+        selected_count: int,
+        selection_range: tuple[float, float] | None,
+        range_target_count: int,
+    ) -> None:
+        self.edit_scope.setText(edit_scope)
+        self.selected_count.setText(str(selected_count))
+        if selection_range is None:
+            self.range_start.setText("-")
+            self.range_end.setText("-")
+            self.range_length.setText("-")
+        else:
+            start, end = selection_range
+            self.range_start.setText(f"{start:.2f} s")
+            self.range_end.setText(f"{end:.2f} s")
+            self.range_length.setText(f"{max(0.0, end - start):.2f} s")
+        self.range_target_count.setText(str(range_target_count))
 
     def set_selected_notes(self, notes: list[VocalNote]) -> None:
         if not notes:
-            self.selected_count.setText("-")
+            self.selected_count.setText("0")
             self._clear_selected()
             return
 
@@ -181,7 +177,12 @@ class InspectorPanel(QFrame):
     def _selected_form(self) -> QFormLayout:
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignLeft)
-        form.addRow("Count", self.selected_count)
+        form.addRow("Edit scope", self.edit_scope)
+        form.addRow("Selected notes count", self.selected_count)
+        form.addRow("Range start", self.range_start)
+        form.addRow("Range end", self.range_end)
+        form.addRow("Range length", self.range_length)
+        form.addRow("Range target notes count", self.range_target_count)
         form.addRow("Track type", self.selected_track)
         form.addRow("Start", self.selected_start)
         form.addRow("End", self.selected_end)
@@ -223,3 +224,22 @@ class InspectorPanel(QFrame):
             return "-"
         voiced = sum(1 for frame in document.pitch_frames if frame.voiced)
         return f"{voiced:,} voiced / {len(document.pitch_frames):,} total" if document.pitch_frames else "-"
+
+    def _controls_text(self, edit_scope: str) -> str:
+        return (
+            f"Edit Scope: {edit_scope}\n"
+            "- Choose Selected / Range / All from Edit Scope\n"
+            "- Click Source note: select\n"
+            "- Shift + Click: multi-select Source notes\n"
+            "- Drag empty timeline: create range selection\n"
+            "- Click empty timeline: move playhead; outside range clears range\n"
+            "- Drag Source note: move notes based on Edit Scope\n"
+            "- Drag Source note edge: resize dragged Source note\n"
+            "- Ctrl + Wheel: zoom time axis\n"
+            "- Wheel: scroll timeline horizontally\n"
+            "- Space: Play from Selection / Stop\n"
+            "- S: split selected Source note at playhead\n"
+            "- M: merge selected Source notes\n"
+            "- Delete: delete selected Source notes\n"
+            "- Arrow keys: nudge notes based on Edit Scope"
+        )

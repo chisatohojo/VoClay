@@ -20,11 +20,14 @@ material.
 - Display editable Source Notes in purple, with orange selection
 - Drag Source Notes left/right for timing and up/down for pitch
 - Resize Source Notes from left/right edges
-- Shift-click or range-drag to select multiple Source Notes
-- Choose `Edit Scope`: `Selected Notes` or `All Source Notes`
-- Move either selected Source Notes or all Source Notes together
+- Shift-click to select multiple Source Notes
+- Drag empty piano-roll space to create a time range selection
+- Choose `Edit Scope`: `Selected Notes`, `Range Selection`, or `All Source Notes`
+- Move selected Source Notes, range-overlapping Source Notes, or all Source Notes together
 - Ctrl + mouse wheel zooms the time axis
 - Mouse wheel scrolls the timeline horizontally
+- Save and load `.voclay` project files with analyzed notes and edit state
+- File dialogs reopen the folder used most recently
 - Split selected Source Note at the playhead with `S`
 - Merge selected Source Notes with `M`
 - Delete selected Source Notes with Delete/Backspace
@@ -65,9 +68,15 @@ python voclay/main.py
    or current playhead.
 9. Use `Export WAV` to write the rendered preview to disk.
 
+Use `Save Project` at any point to keep a `.voclay` project file. Project files
+store the Reference/Source WAV paths, analyzed F0 frames, note blocks, and edit
+count. They do not embed the WAV audio itself, so keep the original WAV files in
+place when reopening a project.
+
 ## Shortcuts
 
 - `Space`: Play from Selection / Stop
+- `Ctrl + S`: Save Project
 - `S`: Split selected Source Note at playhead
 - `M`: Merge selected Source Notes
 - `Delete` or `Backspace`: Delete selected Source Notes
@@ -85,9 +94,12 @@ these editing commands.
 - Shift-click Source Notes for multi-select.
 - Drag the middle of a Source Note to move timing and pitch.
 - Drag the left or right edge of a Source Note to resize timing.
+- Drag empty piano-roll space to create a range selection.
 - Click empty piano-roll space to clear Source Note selection and move the
-  playhead.
+  playhead. Clicking outside the range also clears the range.
 - `Edit Scope: Selected Notes` edits only selected Source Notes.
+- `Edit Scope: Range Selection` moves Source Notes that overlap the selected
+  time range. Reference Notes are still locked.
 - `Edit Scope: All Source Notes` moves all Source Notes together for drag and
   arrow-key timing/pitch changes. Edge resize still affects only the dragged
   Source Note.
